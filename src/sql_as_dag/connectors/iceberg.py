@@ -85,11 +85,22 @@ def _normalize_path(path: str) -> str:
     return path[7:] if path.startswith("file://") else path
 
 
-def _committed_paths(table) -> set[str]:
-    """Return the data-file paths the table's current snapshot already references."""
+def _committed_paths(table, under_prefix: str) -> set[str]:
+    """
+    Data-file paths the current snapshot references that live under ``under_prefix``.
+
+    Restricted to the prefix so the duplicate check can only ever recognise files written by the
+    run being finalized. A broader check risks mistaking a *different* file for one already
+    committed, which would silently drop an append.
+    """
     if table.current_snapshot() is None:
         return set()
-    return {_normalize_path(task.file.file_path) for task in table.scan().plan_files()}
+    prefix = _normalize_path(under_prefix).rstrip("/") + "/"
+    return {
+        path
+        for path in (_normalize_path(task.file.file_path) for task in table.scan().plan_files())
+        if path.startswith(prefix)
+    }
 
 
 class IcebergSink:
@@ -102,26 +113,37 @@ class IcebergSink:
         self._identifier = identifier
         self._props = props
 
-    def _staging_dir(self) -> str:
-        rel = self._identifier.replace(".", "/")
-        return f"{self._warehouse.rstrip('/')}/_staging/{rel}"
+    def _staging_dir(self, run_key: str | None = None) -> str:
+        """
+        Where this run's data files are written before being committed.
 
-    def write(self, table: pa.Table, *, partition_id: int) -> dict[str, Any]:
-        out_dir = ObjectStoragePath(self._staging_dir())
+        Scoped to the run: these files become permanent Iceberg data files once committed, and an
+        Iceberg data file must never be rewritten. Two runs sharing a path would have the second
+        overwrite a file the first already committed, corrupting that snapshot while its metadata
+        still described the old contents.
+        """
+        rel = self._identifier.replace(".", "/")
+        base = f"{self._warehouse.rstrip('/')}/_staging/{rel}"
+        return base if run_key is None else f"{base}/{run_key}"
+
+    def write(self, table: pa.Table, *, partition_id: int, run_key: str | None = None) -> dict[str, Any]:
+        out_dir = ObjectStoragePath(self._staging_dir(run_key))
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"p{partition_id}.parquet"
         with out_path.open("wb") as f:
             pq.write_table(table, f)
         return {"path": str(out_path), "rows": table.num_rows, "partition_id": partition_id}
 
-    def finalize(self, partition_metas: list[dict[str, Any]]) -> dict[str, Any]:
+    def finalize(
+        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
+    ) -> dict[str, Any]:
         paths = [m["path"] for m in partition_metas if m.get("rows", 0) > 0]
         catalog = _load_catalog(self._catalog_name, self._uri, self._warehouse, **self._props)
         table = self._ensure_table(catalog, paths)
-        # Only add files the current snapshot does not already reference, so a retry after a
-        # commit that succeeded but was not recorded converges instead of failing on
-        # add_files' duplicate-file check.
-        committed = _committed_paths(table)
+        # Skip files this run already committed, so a retry after a commit that succeeded but was
+        # not recorded converges instead of failing add_files' duplicate-file check. Scoped to
+        # this run's staging prefix so it cannot mask a genuinely new file.
+        committed = _committed_paths(table, self._staging_dir(run_key))
         new_paths = [p for p in paths if _normalize_path(p) not in committed]
         if new_paths:
             table.add_files(file_paths=new_paths)

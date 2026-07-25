@@ -67,3 +67,57 @@ def test_sink_write_and_finalize(tmp_path: Path) -> None:
     assert summary["partitions"] == 2
     assert summary["rows"] == 3
     assert (tmp_path / "out" / "_SUCCESS").exists()
+
+
+def _run_once(sink: ParquetSink, run_key: str, tables: list[pa.Table]) -> dict:
+    metas = [sink.write(t, partition_id=i, run_key=run_key) for i, t in enumerate(tables)]
+    return sink.finalize(metas, run_key=run_key)
+
+
+def test_sink_output_is_scoped_to_the_run(tmp_path: Path) -> None:
+    """
+    Two runs must not share an output directory.
+
+    Partition ids restart at 0 every run and the bucket count can shrink, so a shared directory
+    would let the second run overwrite p0 while p1 survived from the first — one directory holding
+    rows from two runs, under a freshly written success marker.
+    """
+    base = tmp_path / "out"
+    sink = ParquetSink(base_uri=base.resolve().as_uri())
+
+    first = _run_once(sink, "run_a", [pa.table({"v": [1]}), pa.table({"v": [2]})])
+    second = _run_once(sink, "run_b", [pa.table({"v": [3]})])
+
+    assert first["output_uri"] != second["output_uri"]
+    assert sorted(p.name for p in base.iterdir() if p.is_dir()) == ["run_a", "run_b"]
+    assert [pq.read_table(f)["v"][0].as_py() for f in sorted((base / "run_a").glob("p*/data.parquet"))] == [1, 2]
+    assert [pq.read_table(f)["v"][0].as_py() for f in sorted((base / "run_b").glob("p*/data.parquet"))] == [3]
+    # Each run's result is self-contained and separately marked complete.
+    assert (base / "run_a" / "_SUCCESS").exists()
+    assert (base / "run_b" / "_SUCCESS").exists()
+
+
+def test_latest_pointer_names_the_newest_finalized_run(tmp_path: Path) -> None:
+    """Consumers need a way to find the newest complete result without guessing."""
+    base = tmp_path / "out"
+    sink = ParquetSink(base_uri=base.resolve().as_uri())
+
+    _run_once(sink, "run_a", [pa.table({"v": [1]})])
+    assert (base / "_LATEST").read_text() == "run_a"
+
+    _run_once(sink, "run_b", [pa.table({"v": [2]})])
+    assert (base / "_LATEST").read_text() == "run_b"
+
+
+def test_retry_within_a_run_overwrites_in_place(tmp_path: Path) -> None:
+    """Re-running the same partition of the same run must not duplicate its output."""
+    base = tmp_path / "out"
+    sink = ParquetSink(base_uri=base.resolve().as_uri())
+
+    sink.write(pa.table({"v": [1]}), partition_id=0, run_key="run_a")
+    meta = sink.write(pa.table({"v": [1]}), partition_id=0, run_key="run_a")
+    sink.finalize([meta], run_key="run_a")
+
+    files = sorted((base / "run_a").glob("p*/data.parquet"))
+    assert len(files) == 1
+    assert pq.read_table(files[0])["v"].to_pylist() == [1]

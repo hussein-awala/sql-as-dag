@@ -60,7 +60,9 @@ def test_groupby_compiles_to_partial_shuffle_final(orders_source: Source) -> Non
     assert partial.output_exchange.num_buckets == 3
     assert "__p_0" in partial.sql
     assert final.output_exchange.kind == "pipeline"
-    assert "AS total" in final.sql
+    # Identifiers are always quoted, so a column named after a SQL function cannot be reparsed
+    # as a call to it.
+    assert 'AS "total"' in final.sql
     assert graph.sink_stage_id == "g_final"
 
 
@@ -84,7 +86,7 @@ def test_count_star_compiles(orders_source: Source) -> None:
     )
     partial, final = graph.stages
     assert "count(*) as __p_0" in partial.sql.lower()
-    assert "AS c" in final.sql
+    assert 'AS "c"' in final.sql
 
 
 def test_where_groupby_compiles_with_filter_subquery(orders_source: Source) -> None:
@@ -309,6 +311,7 @@ def test_unaliased_aggregate_emits_valid_sql(tmp_path: Path) -> None:
     graph = compile_sql("SELECT customer_id, SUM(amount) FROM orders GROUP BY customer_id", [source])
     final = graph.stages[-1]
     assert 'AS "sum(orders.amount)"' in final.sql
+    assert "AS sum(orders.amount)" not in final.sql
 
     # And it really executes: quoting is what makes the emitted SQL parseable.
     partials = pa.table({"customer_id": ["a"], "__p_0": [3]})
@@ -424,6 +427,93 @@ def test_three_table_join_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(UnsupportedSQLError):
         compile_sql(sql, sources)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT customer_id, (SELECT MAX(amount) FROM orders) AS global_max FROM orders",
+        "SELECT customer_id, amount IN (SELECT amount FROM orders) AS f FROM orders",
+        "SELECT customer_id, EXISTS (SELECT 1 FROM orders o2 WHERE o2.amount = orders.amount) AS e FROM orders",
+        # Nested inside a larger expression rather than projected on its own.
+        "SELECT customer_id, amount + (SELECT MAX(amount) FROM orders) AS bumped FROM orders",
+        # Same hazard alongside an aggregate.
+        "SELECT customer_id, SUM(amount) AS total, (SELECT MAX(amount) FROM orders) AS mx "
+        "FROM orders GROUP BY customer_id",
+    ],
+)
+def test_subquery_in_select_list_is_rejected(orders_source: Source, sql: str) -> None:
+    """
+    A subquery in the SELECT list must be refused, like one in WHERE.
+
+    The stage SQL runs once per partition, so `(SELECT MAX(amount) FROM orders)` would report the
+    maximum of whichever rows happen to share a partition. Every partition then returns a
+    different "global" value and none is correct — with no error anywhere.
+    """
+    with pytest.raises(UnsupportedSQLError, match="subquery"):
+        compile_sql(sql, [orders_source])
+
+
+def test_string_literal_resembling_a_subquery_is_not_rejected(tmp_path: Path) -> None:
+    """The subquery guard must key on the rendered expression, not a substring of a literal."""
+    p = tmp_path / "orders.parquet"
+    pq.write_table(pa.table({"customer_id": ["a", "<subquery>"], "amount": [10, 20]}), p)
+    source = Source(source_id="orders_src", table_name="orders", options={"uris": [p.resolve().as_uri()]})
+    graph = compile_sql("SELECT customer_id FROM orders WHERE customer_id = '<subquery>'", [source])
+    assert len(graph.stages) == 1
+
+
+def test_column_named_after_a_sql_function_is_not_reparsed(tmp_path: Path) -> None:
+    """
+    A column whose name is a niladic SQL function must be read as a column.
+
+    Emitted unquoted, `max(current_timestamp)` becomes a call to the function and returns a clock
+    reading instead of the column's values — wrong values and a wrong type, silently.
+    """
+    partitions = [
+        {"customer_id": ["a"], "current_timestamp": ["z1"]},
+        {"customer_id": ["a", "b"], "current_timestamp": ["z3", "z2"]},
+    ]
+    source = _orders_source_from(partitions, tmp_path)
+    sql = 'SELECT customer_id, MAX("current_timestamp") AS mx FROM orders GROUP BY customer_id'
+    graph = compile_sql(sql, [source], num_buckets=2)
+
+    distributed = _run_compiled_to_table(graph, partitions, tmp_path)
+    whole = pa.concat_tables([pa.table(p) for p in partitions])
+    reference = execute_sql({"orders": whole}, sql)
+
+    assert distributed.column_names == reference.column_names
+    assert _sorted_rows(distributed) == _sorted_rows(reference)
+    assert _sorted_rows(distributed) == [("a", "z3"), ("b", "z2")]
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["Mixed_Case", "with space", "clé", 'has"quote', "select", "group", "current_date"],
+)
+def test_awkward_column_names_round_trip(tmp_path: Path, column: str) -> None:
+    """Group keys and aggregate arguments must survive names that are not bare identifiers."""
+    partitions = [
+        {column: ["a", "b"], "amount": [10, 20]},
+        {column: ["a", "c"], "amount": [30, 40]},
+    ]
+    uris = []
+    for i, data in enumerate(partitions):
+        p = tmp_path / f"t_{i}.parquet"
+        pq.write_table(pa.table(data), p)
+        uris.append(p.resolve().as_uri())
+    source = Source(source_id="orders_src", table_name="orders", options={"uris": uris})
+
+    quoted = '"' + column.replace('"', '""') + '"'
+    sql = f"SELECT {quoted}, SUM(amount) AS total FROM orders GROUP BY {quoted}"
+    graph = compile_sql(sql, [source], num_buckets=2)
+
+    distributed = _run_compiled_to_table(graph, partitions, tmp_path)
+    whole = pa.concat_tables([pa.table(p) for p in partitions])
+    reference = execute_sql({"orders": whole}, sql)
+
+    assert distributed.column_names == reference.column_names
+    assert _sorted_rows(distributed) == _sorted_rows(reference)
 
 
 def test_self_join_is_rejected(tmp_path: Path) -> None:

@@ -78,33 +78,55 @@ class ParquetSourceConnector:
 
 class ParquetSink:
     """
-    Writes each result partition as ``<base_uri>/p<partition_id>/data.parquet``.
+    Writes each result partition as ``<base_uri>/<run_key>/p<partition_id>/data.parquet``.
 
-    ``finalize`` writes an optional ``_SUCCESS`` marker (MapReduce-style) and returns a
-    summary. It does not need to move or commit anything because the data files are written
-    in place by :meth:`write`.
+    Output is scoped to the run because ``partition_id`` is the bucket id and the bucket count
+    varies between runs under an adaptive policy. Sharing one directory would let a run that
+    produced fewer buckets overwrite part of the previous result and leave the rest in place, so a
+    reader would see rows from two different runs with a freshly written success marker over the
+    top. A run-scoped directory makes each result self-contained and immutable.
+
+    ``finalize`` writes an optional ``_SUCCESS`` marker inside the run directory (MapReduce-style)
+    plus a ``_LATEST`` pointer at the base naming the most recent run, so a consumer can find the
+    newest complete result. It does not move or commit anything: the data files are already
+    written in place by :meth:`write`.
+
+    With no ``run_key`` (calling the connector directly rather than through a DAG) the layout is
+    the flat ``<base_uri>/p<partition_id>/data.parquet``, and the caller owns the collision risk.
     """
 
     def __init__(self, *, base_uri: str, write_success_marker: bool = True) -> None:
         self._base = base_uri.rstrip("/")
         self._write_success_marker = write_success_marker
 
-    def write(self, table: pa.Table, *, partition_id: int) -> dict[str, Any]:
-        out_dir = ObjectStoragePath(f"{self._base}/p{partition_id}")
+    def _run_dir(self, run_key: str | None) -> str:
+        return self._base if run_key is None else f"{self._base}/{run_key}"
+
+    def write(self, table: pa.Table, *, partition_id: int, run_key: str | None = None) -> dict[str, Any]:
+        out_dir = ObjectStoragePath(f"{self._run_dir(run_key)}/p{partition_id}")
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "data.parquet"
         with out_path.open("wb") as f:
             pq.write_table(table, f)
         return {"path": str(out_path), "rows": table.num_rows, "partition_id": partition_id}
 
-    def finalize(self, partition_metas: list[dict[str, Any]]) -> dict[str, Any]:
+    def finalize(
+        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
+    ) -> dict[str, Any]:
+        run_dir = self._run_dir(run_key)
         if self._write_success_marker:
-            base = ObjectStoragePath(self._base)
-            base.mkdir(parents=True, exist_ok=True)
-            with (base / "_SUCCESS").open("wb") as f:
+            out = ObjectStoragePath(run_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            with (out / "_SUCCESS").open("wb") as f:
                 f.write(b"")
+            if run_key is not None:
+                # Pointer to the newest complete result, so consumers do not have to guess which
+                # run directory to read.
+                with (ObjectStoragePath(self._base) / "_LATEST").open("wb") as f:
+                    f.write(run_key.encode())
         return {
             "base_uri": self._base,
+            "output_uri": run_dir,
             "partitions": len(partition_metas),
             "rows": sum(m.get("rows", 0) for m in partition_metas),
         }

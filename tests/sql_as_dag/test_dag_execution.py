@@ -88,18 +88,29 @@ def _run_dag_tasks(dag: Any, graph: StageGraph) -> tuple[dict, dict[str, list[di
             scratch = read(kwargs["input_spec"], kwargs["output_dir"])
             computed = compute(scratch, kwargs["output_dir"])
             outputs.append(
-                write(computed, kwargs["output_dir"], kwargs["partition_id"], kwargs["num_buckets"])
+                write(
+                    computed,
+                    kwargs["output_dir"],
+                    kwargs["partition_id"],
+                    kwargs["num_buckets"],
+                    kwargs["run_key"],
+                )
             )
         stage_outputs[sid] = outputs
 
-    result = callable_for("finalize")(stage_outputs[graph.sink_stage_id])
+    result = callable_for("finalize")(stage_outputs[graph.sink_stage_id], work_dir)
     return result, stage_outputs
 
 
-def _read_sink(base_uri: str) -> pa.Table | None:
-    """Read every ``p*/data.parquet`` the Parquet sink wrote, or None when it wrote nothing."""
+def _latest_run_dir(base_uri: str) -> Path:
+    """The run directory the Parquet sink's ``_LATEST`` pointer names."""
     base = Path(base_uri.removeprefix("file://"))
-    files = sorted(base.glob("p*/data.parquet"))
+    return base / (base / "_LATEST").read_text()
+
+
+def _read_sink(base_uri: str) -> pa.Table | None:
+    """Read every ``p*/data.parquet`` of the latest run, or None when it wrote nothing."""
+    files = sorted(_latest_run_dir(base_uri).glob("p*/data.parquet"))
     if not files:
         return None
     return pa.concat_tables([pq.read_table(f) for f in files])
@@ -143,7 +154,7 @@ def test_mapped_tasks_execute_end_to_end(tmp_path: Path) -> None:
     assert written.column_names == reference.column_names
     assert _sorted_rows(written) == _sorted_rows(reference)
     assert result["rows"] == reference.num_rows
-    assert (Path(out) / "_SUCCESS").exists()
+    assert (_latest_run_dir(out.resolve().as_uri()) / "_SUCCESS").exists()
 
 
 def test_join_mapped_tasks_execute_end_to_end(tmp_path: Path) -> None:
@@ -244,7 +255,7 @@ def test_empty_result_still_finalizes(tmp_path: Path) -> None:
     assert stage_outputs[graph.sink_stage_id] == []
     assert result["rows"] == 0
     assert result["partitions"] == 0
-    assert (Path(out) / "_SUCCESS").exists()
+    assert (_latest_run_dir(out.resolve().as_uri()) / "_SUCCESS").exists()
     assert _read_sink(out.resolve().as_uri()) is None
 
 

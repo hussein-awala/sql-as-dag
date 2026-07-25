@@ -37,7 +37,6 @@ All DataFusion logical-plan introspection is confined to this module.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -103,6 +102,10 @@ def _classify(plan: Any) -> dict[str, Any]:
     if _name(proj) != "Projection":
         raise UnsupportedSQLError(f"top-level node must be a Projection, got {_name(proj)}")
 
+    # Checked before dispatching on shape, so it covers the passthrough, aggregate, and join
+    # branches alike — the join branch in particular returns immediately below.
+    _reject_subquery_projection(proj)
+
     inner_plan = plan.inputs()[0]
     inner = inner_plan.to_variant()
     inner_name = _name(inner)
@@ -144,6 +147,34 @@ def _classify(plan: Any) -> dict[str, Any]:
     raise UnsupportedSQLError(f"unsupported plan shape: Projection → {inner_name}")
 
 
+#: Expression variants that are a subquery. Checked structurally where the expression is
+#: reachable; ``_SUBQUERY_MARKER`` is the backstop for arbitrarily nested ones.
+_SUBQUERY_VARIANTS = frozenset({"ScalarSubquery", "InSubquery", "Exists"})
+
+#: How DataFusion renders an embedded subquery. The parentheses matter: a string *literal*
+#: '<subquery>' renders as ``Utf8("<subquery>")``, which must not be mistaken for a real one.
+_SUBQUERY_MARKER = "(<subquery>)"
+
+
+def _contains_subquery(expr: Any) -> bool:
+    """
+    Whether ``expr`` embeds a subquery.
+
+    Unwraps aliases and checks the variant name, which is exact. Falls back to DataFusion's
+    rendering for a subquery nested inside another expression (``a > (SELECT ...)``), where the
+    Python bindings expose no generic way to walk an expression's children.
+    """
+    current = expr
+    while True:
+        variant = current.to_variant()
+        if _name(variant) in _SUBQUERY_VARIANTS:
+            return True
+        if _name(variant) != "Alias":
+            break
+        current = _call(variant.expr)
+    return _SUBQUERY_MARKER in str(expr)
+
+
 def _reject_subquery_predicate(filter_node: Any) -> None:
     """
     Reject a ``WHERE`` predicate that embeds a subquery.
@@ -153,15 +184,31 @@ def _reject_subquery_predicate(filter_node: Any) -> None:
     orders)`` would compare each row against *its own partition's* average instead of the global
     one, and return a different set of rows than a single-node engine — silently.
 
-    DataFusion keeps such a subquery inside the predicate expression (rendered ``(<subquery>)``)
-    rather than as a relational input, so walking the plan's inputs never sees it.
+    DataFusion keeps such a subquery inside the predicate expression rather than as a relational
+    input, so walking the plan's inputs never sees it.
     """
     predicate = _call(filter_node.to_variant().predicate)
-    if "<subquery>" in str(predicate):
+    if _contains_subquery(predicate):
         raise UnsupportedSQLError(
             "subquery in WHERE is not supported: it would be evaluated per partition and give a "
             f"different answer than a single-node run ({predicate})"
         )
+
+
+def _reject_subquery_projection(proj: Any) -> None:
+    """
+    Reject a subquery in the ``SELECT`` list, for the same reason as in ``WHERE``.
+
+    ``SELECT customer_id, (SELECT MAX(amount) FROM orders) AS global_max FROM orders`` would
+    compute the maximum of whichever rows happen to share a partition, so every partition
+    reports a different "global" maximum and none of them is right.
+    """
+    for item in _call(proj.projections):
+        if _contains_subquery(item):
+            raise UnsupportedSQLError(
+                "subquery in the SELECT list is not supported: it would be evaluated per "
+                f"partition and give a different answer than a single-node run ({item})"
+            )
 
 
 def _extract_group_keys(agg: Any) -> list[str]:
@@ -254,16 +301,18 @@ def _extract_output_columns(proj: Any) -> list[tuple[str, str, str]]:
     return out
 
 
-#: An identifier we can emit bare: DataFusion lower-cases unquoted identifiers, so anything
-#: with uppercase or punctuation (notably an unaliased aggregate's ``sum(orders.amount)``) must
-#: be double-quoted to survive as the user's requested output name.
-_BARE_IDENT = re.compile(r"[a-z_][a-z0-9_]*\Z")
-
-
 def _quote_ident(name: str) -> str:
-    """Quote ``name`` for use as a SQL identifier, only when it cannot be emitted bare."""
-    if _BARE_IDENT.match(name):
-        return name
+    """
+    Quote ``name`` for use as a SQL identifier.
+
+    Always quoted, never bare. Every name reaching here is either a real column name or a
+    user-supplied alias, so quoting is always the faithful rendering — and emitting bare is not
+    merely cosmetic. An unquoted lowercase name can parse as something other than a column: a
+    column called ``current_timestamp`` would become a call to the niladic function of that name,
+    silently returning a clock reading instead of the column's values. Quoting also preserves
+    case (DataFusion lower-cases unquoted identifiers) and handles punctuation, such as an
+    unaliased aggregate's ``sum(orders.amount)``.
+    """
     return '"' + name.replace('"', '""') + '"'
 
 

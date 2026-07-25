@@ -94,6 +94,64 @@ def test_finalize_is_idempotent(tmp_path: Path) -> None:
     assert sorted(rows) == [("a", 10), ("b", 20), ("c", 30)]
 
 
+def _rows(cfg: dict) -> list[tuple]:
+    source = IcebergSourceConnector(**cfg)
+    rows: list[tuple] = []
+    for ref in source.list_partitions():
+        table = source.read_partition(ref)
+        rows += list(zip(table.column("customer_id").to_pylist(), table.column("total").to_pylist()))
+    return sorted(rows)
+
+
+def test_second_run_appends_instead_of_corrupting_the_first(tmp_path: Path) -> None:
+    """
+    A later run must not write over a data file an earlier run already committed.
+
+    Staging paths are derived from the partition id, which restarts at 0 each run, so without a
+    run scope the second run would rewrite ``p0.parquet`` in place. Iceberg's metadata still
+    describes the file it committed, so the first snapshot would silently start reporting the
+    second run's rows.
+    """
+    (tmp_path / "warehouse").mkdir()
+    cfg = _cfg(tmp_path)
+    sink = IcebergSink(**cfg)
+
+    m0 = sink.write(pa.table({"customer_id": ["a"], "total": [10]}), partition_id=0, run_key="run_a")
+    sink.finalize([m0], run_key="run_a")
+
+    m1 = sink.write(pa.table({"customer_id": ["b"], "total": [20]}), partition_id=0, run_key="run_b")
+    second = sink.finalize([m1], run_key="run_b")
+
+    assert m0["path"] != m1["path"]
+    assert second["files_added"] == 1
+    assert second["files_already_committed"] == 0
+    # Both runs' rows are present: the first was appended to, not overwritten.
+    assert _rows(cfg) == [("a", 10), ("b", 20)]
+
+
+def test_idempotency_check_does_not_look_outside_the_run(tmp_path: Path) -> None:
+    """
+    The already-committed filter must be scoped to the run being finalized.
+
+    A broader check could match a file from an earlier run and treat this run's file as already
+    committed, skipping the append and losing rows with no error.
+    """
+    (tmp_path / "warehouse").mkdir()
+    cfg = _cfg(tmp_path)
+    sink = IcebergSink(**cfg)
+
+    metas_a = [sink.write(pa.table({"customer_id": ["a"], "total": [10]}), partition_id=0, run_key="run_a")]
+    sink.finalize(metas_a, run_key="run_a")
+
+    metas_b = [sink.write(pa.table({"customer_id": ["b"], "total": [20]}), partition_id=0, run_key="run_b")]
+    sink.finalize(metas_b, run_key="run_b")
+    # Retrying run_b still converges, and still sees only its own committed file.
+    retry = sink.finalize(metas_b, run_key="run_b")
+    assert retry["files_added"] == 0
+    assert retry["files_already_committed"] == 1
+    assert _rows(cfg) == [("a", 10), ("b", 20)]
+
+
 def test_finalize_with_no_rows_and_missing_table_explains_itself(tmp_path: Path) -> None:
     """
     An empty result cannot create a new Iceberg table, and must say why.

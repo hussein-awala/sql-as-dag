@@ -33,7 +33,8 @@ Each of these raises `UnsupportedSQLError`:
 | Joins of three or more tables | Only one join node is lowered; a second one cannot resolve to a single source table. |
 | `LIMIT` and `SELECT DISTINCT` | The top-level plan node must be a projection; both wrap it in a node the compiler refuses. |
 | Join keys of different types | DataFusion inserts a `CAST`; hashing each side independently on differently-typed values would route equal keys to different buckets and silently drop matches. Cast both keys explicitly in the query instead. |
-| `HAVING`, sub-queries, window functions, `ORDER BY` as a global sort, set operations | Not implemented. |
+| A subquery in `WHERE` or in the `SELECT` list | Stage SQL runs once per partition, so `amount > (SELECT AVG(amount) FROM orders)` compares each row against *its own partition's* average, and `(SELECT MAX(amount) FROM orders) AS mx` reports a different "global" maximum per partition. Both would return a wrong answer with no error, so they are refused — scalar, `IN`, and `EXISTS` forms alike, including a subquery nested inside a larger expression. |
+| `HAVING`, window functions, `ORDER BY` as a global sort, set operations | Not implemented. |
 | More than one source in a non-join query | Not a supported plan shape. |
 
 ## Structural limits of the runtime

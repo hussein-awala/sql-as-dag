@@ -76,6 +76,11 @@ The partial stage aggregates each source partition independently and hash-partit
 `customer_id`; the final stage combines the partials per bucket. Because equal keys always hash to
 the same bucket, the per-bucket results simply concatenate into the correct answer.
 
+The result lands under a per-run directory — `file:///tmp/out/<run>/p*/data.parquet`, with `_SUCCESS`
+beside it and a `_LATEST` file at the base naming the newest finalized run. Each run's output is
+self-contained, so re-running never mixes two runs' rows together; see
+[docs/connectors.md](docs/connectors.md#writes-are-scoped-to-the-run).
+
 ## What it supports
 
 - `SELECT`, `WHERE`, projection, and column aliases.
@@ -95,7 +100,8 @@ error rather than silently producing a wrong number. The boundaries are document
 Runnable demo DAGs live in [`examples/dags/`](examples/dags): passthrough, a hand-built and a
 compiled `GROUP BY`, a shuffle join, a broadcast join, adaptive shuffle width, and an Iceberg sink.
 Each one materializes its own small demo input, so you can drop them into an Airflow DAGs folder and
-trigger them as-is.
+trigger them as-is. They write under a temp directory named after the DAG — the Parquet ones to
+`<tmp>/<dag_id>/out/<run>/p*/data.parquet`.
 
 ## Documentation
 

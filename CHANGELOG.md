@@ -26,6 +26,28 @@ answer rather than an error, which is the one thing the project sets out not to 
 - Licensing corrected: the project's own copyright and the standard Apache-2.0 header replace the
   ASF contributor headers and Airflow's `NOTICE`.
 
+A second review round found three more silent-wrong-answer paths and one data-loss path:
+
+- **A subquery in the `SELECT` list is now rejected too**, for the same per-partition reason as one
+  in `WHERE`: `SELECT (SELECT MAX(amount) FROM orders) AS mx` reported a different "global" maximum
+  in every partition. Scalar, `IN`, and `EXISTS` forms are all caught, including a subquery nested
+  inside a larger expression. The check is now structural (on the plan's expression variants)
+  rather than a substring match, so a string literal containing `<subquery>` is no longer mistaken
+  for one.
+- **Identifiers are always quoted.** A lowercase name was emitted bare, so a column named after a
+  niladic SQL function — `current_timestamp`, `current_date` — was reparsed as a call to that
+  function and returned a clock reading instead of the column's values.
+- **Sink writes are scoped to the DAG run.** Paths were derived from `partition_id` alone, which
+  restarts at 0 each run and whose range shrinks when adaptive bucketing picks a smaller width. A
+  second run therefore overwrote the first few Parquet partitions and left the rest, publishing a
+  directory holding two runs' rows under a fresh `_SUCCESS`; for Iceberg it rewrote data files an
+  earlier snapshot had already committed, silently changing what that snapshot returned. `write`
+  and `finalize` now take a `run_key` derived from the run's work directory, so Parquet writes
+  `<base>/<run_key>/p<id>/data.parquet` (plus a `_LATEST` pointer to the newest finalized run) and
+  Iceberg stages under a per-run prefix. Retries within a run reuse the same paths, so they stay
+  idempotent, and the Iceberg duplicate-file check is scoped to the run being finalized so it
+  cannot mask a genuinely new file.
+
 ## 0.0.1
 
 Initial incubation release. Demo companion for the Airflow Summit 2026 talk

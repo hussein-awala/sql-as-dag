@@ -23,8 +23,8 @@ structural typing is enough.
 
 | Method | Purpose |
 | --- | --- |
-| `write(table, *, partition_id)` | Write one result partition; return JSON-serializable metadata. |
-| `finalize(partition_metas)` | Commit after all partitions are written. |
+| `write(table, *, partition_id, run_key)` | Write one result partition; return JSON-serializable metadata. |
+| `finalize(partition_metas, *, run_key)` | Commit after all partitions are written. |
 
 ### When each method is called
 
@@ -53,16 +53,47 @@ sequenceDiagram
         Src-->>Mapped: Arrow table
     end
     loop one per result partition
-        Mapped->>Snk: write(table, partition_id)
+        Mapped->>Snk: write(table, partition_id, run_key)
         Snk-->>Mapped: metadata dict
     end
-    Planner->>Snk: finalize(partition_metas)
+    Planner->>Snk: finalize(partition_metas, run_key)
 ```
 
 The `finalize` split exists for transactional formats. Parquet has nothing to do — the files are
 already there — but Iceberg needs to append the written data files and commit a single snapshot, so
 that either the whole query result becomes visible or none of it does. Putting the commit in its own
 task also makes it visible and separately retryable.
+
+## Writes are scoped to the run
+
+`write` and `finalize` both receive a `run_key`: one value that identifies the DAG run and is the
+same in every task of it. A sink is expected to include it in the paths it writes.
+
+This is not tidiness, it is correctness. Paths are otherwise derived from `partition_id`, which is
+the bucket id — it restarts at 0 on every run, and the number of buckets changes between runs under
+an adaptive policy. Two runs sharing a directory means a run that produced fewer buckets overwrites
+the first few partitions of the previous result and leaves the rest untouched, so a reader sees rows
+from two different runs behind a freshly written success marker. For Iceberg it is worse: a data file
+is immutable once committed, so rewriting one silently changes what an already-committed snapshot
+returns.
+
+Retries are the reason the key identifies the run rather than the attempt: a retried task recomputes
+the same key and so writes to the same path, which is what makes the retry idempotent rather than
+additive.
+
+The built-ins therefore lay out:
+
+| Sink | Layout |
+| --- | --- |
+| `parquet` | `<base_uri>/<run_key>/p<partition_id>/data.parquet`, `_SUCCESS` in the run directory, and a `_LATEST` file at the base naming the newest finalized run |
+| `iceberg` | staged at `<warehouse>/_staging/<db>/<table>/<run_key>/p<partition_id>.parquet`, then committed to the table by `finalize` |
+
+Each Parquet run is a self-contained, immutable result directory, so read `_LATEST` (or pick a run
+directory explicitly) rather than globbing the base. Iceberg has no such concern — the table itself
+is the current state, and each run appends a snapshot.
+
+Calling a sink directly, outside a DAG, leaves `run_key` as `None`; the layout is then the flat
+un-scoped one and the caller owns the collision risk.
 
 ## Two hard constraints
 

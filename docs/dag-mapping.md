@@ -90,13 +90,21 @@ An upstream *failure* still prevents the commit. The one case that cannot succee
 result destined for an Iceberg table that does not exist yet — there is no data file to infer a
 schema from, so it raises with an explanation instead of doing nothing.
 
-## The work directory
+## The work directory, and the run key
 
 `make_work_dir` mints one scratch location per run. With no `work_dir_base`, it is a local temp
 directory (fine for a single-machine demo). Set `work_dir_base` to something like
 `s3://bucket/prefix` and intermediates go to object storage under `<base>/<dag_id>/<run_id>` — which
 is required as soon as tasks run on separate workers, since a local temp dir on one worker is not
 visible to another.
+
+The work directory doubles as the run's identity. Every task already receives it, and it is already
+unique per run, so its last path segment is used as the **run key** that the planner tasks pass to
+each mapped partition and that `write` and `finalize` hand to the sink. Deriving it this way means
+the whole run agrees on one value with no extra XCom and no dependence on the task context — and a
+retried task recomputes the same value, which is what keeps a retry idempotent rather than
+duplicating output. [Connectors](connectors.md#writes-are-scoped-to-the-run) covers what sinks do
+with it and why sharing paths between runs corrupts results.
 
 ## Structural guardrails
 

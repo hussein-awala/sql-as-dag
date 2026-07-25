@@ -109,9 +109,9 @@ def dag_from_stages(
         # "returned nothing" indistinguishable from "never ran". 'none_failed' still refuses to
         # commit when an upstream actually failed.
         @task(task_id="finalize", trigger_rule="none_failed")
-        def finalize(partition_metas: list[dict] | None) -> dict:
+        def finalize(partition_metas: list[dict] | None, work_dir: str) -> dict:
             connector = get_sink(sink_connector)(**sink_options)
-            return connector.finalize(list(partition_metas or []))
+            return connector.finalize(list(partition_metas or []), run_key=run_key(work_dir))
 
         work_dir = make_work_dir()
 
@@ -154,9 +154,21 @@ def dag_from_stages(
                 )
             stage_outputs[stage.stage_id] = runner.expand_kwargs(kwargs)
 
-        finalize(stage_outputs[sink_stage_id])
+        finalize(stage_outputs[sink_stage_id], work_dir)
 
     return _generated()
+
+
+def run_key(work_dir: str) -> str:
+    """
+    A per-run identifier derived from the run's work directory.
+
+    Sinks use it to keep each run's output separate. The work dir is already unique per run — a
+    sanitized run id under a configured base, or a fresh temp directory otherwise — so its last
+    path segment is a run identifier that every task can compute from a value it already has,
+    with no dependency on the task context.
+    """
+    return work_dir.rstrip("/").rsplit("/", 1)[-1]
 
 
 def _mint_work_dir(base: str | None, dag_id: str, run_id: str) -> str:
@@ -229,6 +241,7 @@ def _make_source_prepare(stage: Stage, source):
                 "output_dir": f"{base}/{stage_id}/p{i}",
                 "partition_id": i,
                 "num_buckets": num_buckets,
+                "run_key": run_key(work_dir),
             }
             for i, ref in enumerate(connector.list_partitions())
         ]
@@ -246,13 +259,14 @@ def _make_gather(stage: Stage, broadcast_threshold: int):
     stage_id = stage.stage_id
     table_names = [inp.table_name for inp in stage.inputs]
 
-    def _to_kwargs(plan: list[dict]) -> list[dict]:
+    def _to_kwargs(plan: list[dict], work_dir: str) -> list[dict]:
         return [
             {
                 "input_spec": {t: {"input_paths": paths} for t, paths in si["input_paths_by_table"].items()},
                 "output_dir": si["output_dir"],
                 "partition_id": si["bucket"],
                 "num_buckets": 1,  # terminal stage writes to the sink; unused
+                "run_key": run_key(work_dir),
             }
             for si in plan
         ]
@@ -271,7 +285,7 @@ def _make_gather(stage: Stage, broadcast_threshold: int):
                 broadcast_threshold=broadcast_threshold,
             )
             print(f"join {stage_id}: strategy={ {si['strategy'] for si in plan} }, partitions={len(plan)}")
-            return _to_kwargs(plan)
+            return _to_kwargs(plan, work_dir)
 
         return gather
 
@@ -279,7 +293,7 @@ def _make_gather(stage: Stage, broadcast_threshold: int):
     def gather(upstream_outputs: list, work_dir: str) -> list[dict]:
         upstreams_by_table = {table_names[i]: upstream_outputs[i] for i in range(len(table_names))}
         plan = gather_multi(upstreams_by_table, output_base=f"{work_dir.rstrip('/')}/{stage_id}")
-        return _to_kwargs(plan)
+        return _to_kwargs(plan, work_dir)
 
     return gather
 
@@ -299,7 +313,7 @@ def _make_stage_runner(
     shuffle_keys = list(stage.output_exchange.keys)
 
     @task_group(group_id=f"stage_{stage_id}")
-    def runner(input_spec: dict, output_dir: str, partition_id: int, num_buckets: int):
+    def runner(input_spec: dict, output_dir: str, partition_id: int, num_buckets: int, run_key: str):
         @task(task_id="read")
         def read(input_spec: dict, output_dir: str) -> dict:
             base = output_dir.rstrip("/")
@@ -320,11 +334,11 @@ def _make_stage_runner(
             return write_table(result, f"{output_dir.rstrip('/')}/_scratch_compute.parquet")
 
         @task(task_id="write")
-        def write(scratch_uri: str, output_dir: str, partition_id: int, num_buckets: int) -> dict:
+        def write(scratch_uri: str, output_dir: str, partition_id: int, num_buckets: int, run_key: str) -> dict:
             table = read_table(scratch_uri)
             if is_terminal:
                 connector = get_sink(sink_connector)(**sink_options)
-                return connector.write(table, partition_id=partition_id)
+                return connector.write(table, partition_id=partition_id, run_key=run_key)
             base = output_dir.rstrip("/")
             files: list[dict] = []
             for bucket, sub in hash_partition(table, shuffle_keys, num_buckets):
@@ -339,7 +353,7 @@ def _make_stage_runner(
 
         scratch_read = read(input_spec, output_dir)
         scratch_compute = compute(scratch_read, output_dir)
-        return write(scratch_compute, output_dir, partition_id, num_buckets)
+        return write(scratch_compute, output_dir, partition_id, num_buckets, run_key)
 
     return runner
 

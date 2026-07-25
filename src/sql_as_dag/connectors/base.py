@@ -80,20 +80,32 @@ class SourceConnector(Protocol):
 class SinkConnector(Protocol):
     """Materializes the final query result, one partition at a time, then commits."""
 
-    def write(self, table: pa.Table, *, partition_id: int) -> dict[str, Any]:
+    def write(self, table: pa.Table, *, partition_id: int, run_key: str | None = None) -> dict[str, Any]:
         """
         Write one result partition.
+
+        ``run_key`` identifies the DAG run and is stable across every task in it. A sink should
+        include it in the paths it writes so that two runs never collide: ``partition_id`` is the
+        bucket id, and the number of buckets varies between runs under an adaptive policy, so
+        run-agnostic paths let a later run overwrite part of an earlier result and leave the rest.
+        Retries within one run reuse the same paths, which is what makes a retry idempotent.
 
         Return JSON-serializable metadata (path, row count) suitable for XCom and for
         :meth:`finalize`.
         """
         ...
 
-    def finalize(self, partition_metas: list[dict[str, Any]]) -> dict[str, Any]:
+    def finalize(
+        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
+    ) -> dict[str, Any]:
         """
         Run the optional commit step after all partitions are written.
 
-        For Parquet this is effectively a no-op (files already exist); for transactional
-        formats such as Iceberg it appends the written data files and commits a snapshot.
+        For Parquet this publishes a success marker; for transactional formats such as Iceberg it
+        appends the written data files and commits a snapshot. Receives the same ``run_key`` as
+        :meth:`write`.
+
+        Must tolerate an empty ``partition_metas``: a query that legitimately matches no rows
+        still needs to commit, so that "returned nothing" is distinguishable from "never ran".
         """
         ...

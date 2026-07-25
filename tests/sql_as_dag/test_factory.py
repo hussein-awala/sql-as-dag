@@ -22,13 +22,27 @@ import pytest
 
 from sql_as_dag.connectors.registry import get_sink, get_source
 from sql_as_dag.dag import dag_from_stages
-from sql_as_dag.dag.factory import _mint_work_dir
+from sql_as_dag.dag.factory import _mint_work_dir, run_key
 from sql_as_dag.ir import Exchange, Sink, Source, Stage, StageGraph, StageInput
 from sql_as_dag.runtime.coordinator import gather_shuffle
 from sql_as_dag.runtime.executor import execute_sql
 from sql_as_dag.runtime.shuffle import hash_partition
 
 _SINK = Sink("parquet", {"base_uri": "file:///tmp/sql_as_dag_unused"})
+
+
+def _write_parquet(path: Path, data: dict[str, list]) -> str:
+    pq.write_table(pa.table(data), path)
+    return path.resolve().as_uri()
+
+
+def _scan_stage(stage_id: str, source_id: str, table_name: str, *, num_buckets: int = 2) -> Stage:
+    return Stage(
+        stage_id=stage_id,
+        sql=f"SELECT * FROM {table_name}",
+        inputs=[StageInput(table_name=table_name, source_id=source_id)],
+        output_exchange=Exchange(kind="hash_shuffle", keys=["customer_id"], num_buckets=num_buckets),
+    )
 
 
 def _single_stage_graph(*, uris: list[str], exchange: Exchange | None = None) -> StageGraph:
@@ -212,6 +226,76 @@ def test_mint_work_dir_defaults_to_tempdir() -> None:
     work_dir = _mint_work_dir(None, "my_dag", "")
     assert work_dir.startswith("file://")
     assert "my_dag_" in work_dir
+
+
+def test_run_key_is_the_work_dir_leaf() -> None:
+    """
+    The run key is derived from the work dir, which is already unique per run.
+
+    Every task receives the work dir, so deriving the key from it means the whole run agrees on
+    one value without reading the task context or passing an extra XCom.
+    """
+    assert run_key("file:///wh/my_dag/manual__2026-01-01") == "manual__2026-01-01"
+    assert run_key("file:///wh/my_dag/manual__2026-01-01/") == "manual__2026-01-01"
+    assert run_key(_mint_work_dir(None, "my_dag", "")).startswith("my_dag_")
+
+
+def test_run_key_reaches_every_partition_of_every_stage(tmp_path: Path) -> None:
+    """
+    The planner tasks must hand each mapped partition the run key.
+
+    The write task passes it to the sink, which uses it to keep runs apart. One disagreeing value
+    would scatter a single run's output across two directories.
+    """
+    orders = _write_parquet(tmp_path / "o0.parquet", {"customer_id": ["a", "b"], "amount": [1, 2]})
+    customers = _write_parquet(tmp_path / "c0.parquet", {"customer_id": ["a"], "name": ["Ann"]})
+    graph = StageGraph(
+        stages=[
+            _scan_stage("scan_o", "orders_src", "orders"),
+            _scan_stage("scan_c", "customers_src", "customers"),
+            Stage(
+                stage_id="join",
+                sql="SELECT * FROM orders JOIN customers USING (customer_id)",
+                inputs=[
+                    StageInput(table_name="orders", upstream_stage_id="scan_o"),
+                    StageInput(table_name="customers", upstream_stage_id="scan_c"),
+                ],
+                output_exchange=Exchange(kind="pipeline"),
+            ),
+        ],
+        sources=[
+            Source(source_id="orders_src", table_name="orders", options={"uris": [orders]}),
+            Source(source_id="customers_src", table_name="customers", options={"uris": [customers]}),
+        ],
+        sink_stage_id="join",
+    )
+    dag = dag_from_stages(
+        graph,
+        dag_id="run_key_threading",
+        sink=Sink("parquet", {"base_uri": (tmp_path / "out").resolve().as_uri()}),
+        schedule=None,
+        start_date=datetime(2026, 1, 1),
+    )
+
+    work_dir = dag.get_task("make_work_dir").python_callable()
+    expected = run_key(work_dir)
+
+    scan_kwargs = [
+        kw
+        for sid in ("scan_o", "scan_c")
+        for kw in dag.get_task(f"plan_partitions_{sid}").python_callable(work_dir, 2)
+    ]
+    assert scan_kwargs
+    assert {kw["run_key"] for kw in scan_kwargs} == {expected}
+
+    # The gather task plans the reduce side from upstream output, so check it too.
+    upstream = [
+        [{"partition_id": 0, "files": [{"path": orders, "bucket": 0, "rows": 2}], "rows_out": 2}],
+        [{"partition_id": 0, "files": [{"path": customers, "bucket": 0, "rows": 1}], "rows_out": 1}],
+    ]
+    join_kwargs = dag.get_task("gather_shuffle_join").python_callable(upstream, work_dir)
+    assert join_kwargs
+    assert {kw["run_key"] for kw in join_kwargs} == {expected}
 
 
 def test_runtime_pipeline_end_to_end(tmp_path: Path) -> None:
