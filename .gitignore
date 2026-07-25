@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments / tooling
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local scratch
+/tmp/
+*.parquet
+
+# Private working notes (design narrative lives in docs/)
+/.airflow-sql-as-dag/

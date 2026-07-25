@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sql-as-dag"
+version = "0.0.1"
+description = "Compile a SQL query into an Apache Airflow DAG — a small distributed SQL engine on Airflow, with per-partition execution by Apache DataFusion."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.10"
+authors = [{ name = "Hussein Awala", email = "hussein@awala.fr" }]
+keywords = ["airflow", "sql", "datafusion", "query-engine", "dag", "shuffle"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Apache Airflow",
+    "Framework :: Apache Airflow :: Provider",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "apache-airflow>=3.0.0",
+    # The SQL compiler introspects DataFusion's logical-plan shapes and relies on it inserting
+    # a CAST for mismatched join keys; those behaviors are version-sensitive. Pin to the tested
+    # floor and bump only after testing.
+    "datafusion>=51.0.0",
+    "pyarrow>=16.1.0",
+]
+
+[project.optional-dependencies]
+# Iceberg source/sink connectors (the connector module imports pyiceberg lazily).
+iceberg = ["pyiceberg>=0.8.0"]
+
+[project.urls]
+Homepage = "https://github.com/hussein-awala/sql-as-dag"
+Source = "https://github.com/hussein-awala/sql-as-dag"
+"Talk" = "https://airflowsummit.org/sessions/2026/a-sql-query-is-just-a-dag/"
+
+# Registers this package as a third-party Airflow provider (operators/links/metadata) when
+# Airflow starts, via the provider manager's entry-point discovery.
+[project.entry-points."apache_airflow_provider"]
+provider_info = "sql_as_dag.get_provider_info:get_provider_info"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pyiceberg>=0.8.0",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sql_as_dag"]
+
+[tool.uv.sources]
+# apache-airflow resolves from PyPI (no workspace); nothing special needed here.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# importlib mode so the test package dir doesn't shadow the installed `sql_as_dag` package.
+addopts = "-q --import-mode=importlib"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "B", "I", "UP", "C4"]
+# B905 (zip without strict=) would change validated runtime semantics; left as-is.
+ignore = ["B905"]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
