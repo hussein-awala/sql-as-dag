@@ -26,6 +26,36 @@ structural typing is enough.
 | `write(table, *, partition_id)` | Write one result partition; return JSON-serializable metadata. |
 | `finalize(partition_metas)` | Commit after all partitions are written. |
 
+### When each method is called
+
+The parse-time versus run-time split is the thing to internalize: `schema()` runs on every DAG
+parse, so it must be cheap and must not read data. Everything else runs inside tasks.
+
+```mermaid
+sequenceDiagram
+    participant Sched as Scheduler (DAG parse)
+    participant Planner as Planner tasks
+    participant Mapped as Mapped stage instances
+    participant Src as SourceConnector
+    participant Snk as SinkConnector
+
+    Sched->>Src: schema()
+    Note over Sched,Src: metadata only, no data read
+    Planner->>Src: list_partitions()
+    Src-->>Planner: [PartitionRef, ...]
+    Planner->>Src: estimate_total_rows() / _bytes()
+    Note over Planner,Src: width planner only, metadata only
+    loop one per partition
+        Mapped->>Src: read_partition(ref)
+        Src-->>Mapped: Arrow table
+    end
+    loop one per result partition
+        Mapped->>Snk: write(table, partition_id)
+        Snk-->>Mapped: metadata dict
+    end
+    Planner->>Snk: finalize(partition_metas)
+```
+
 The `finalize` split exists for transactional formats. Parquet has nothing to do — the files are
 already there — but Iceberg needs to append the written data files and commit a single snapshot, so
 that either the whole query result becomes visible or none of it does. Putting the commit in its own

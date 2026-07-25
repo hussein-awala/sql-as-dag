@@ -82,6 +82,24 @@ The decision uses the row counts the map side already reported through XCom, so 
 extra to make. Both strategies are correct for an INNER equi-join; only the data movement differs.
 The chosen strategy is logged by the planner task, so the grid shows which one a given run picked.
 
+```mermaid
+flowchart TB
+    subgraph shuffled [Shuffle join: each bucket sees one fragment per side]
+        direction LR
+        LB0["orders bucket 0"] --> J0["join bucket 0"]
+        RB0["customers bucket 0"] --> J0
+        LB1["orders bucket 1"] --> J1["join bucket 1"]
+        RB1["customers bucket 1"] --> J1
+    end
+    subgraph broadcast [Broadcast join: every bucket sees all of the small side]
+        direction LR
+        BL0["orders bucket 0"] --> BJ0["join bucket 0"]
+        BL1["orders bucket 1"] --> BJ1["join bucket 1"]
+        Small["all customers files"] --> BJ0
+        Small --> BJ1
+    end
+```
+
 ## Internal exchange format
 
 Parquet, always, through Airflow's `ObjectStoragePath`. Columnar and typed, so no schema is lost

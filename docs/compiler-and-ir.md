@@ -38,6 +38,20 @@ DataFusion does the parsing and planning. The compiler registers each source's s
 `SessionContext` — one explicitly-empty Arrow batch per table, enough for planning and validation
 without reading data — then pattern-matches the resulting logical plan.
 
+```mermaid
+flowchart LR
+    SQLText["SQL text"] --> Ctx["SessionContext<br/>with source schemas"]
+    Ctx --> Plan["LogicalPlan"]
+    Plan --> Classify{"classify<br/>plan shape"}
+    Classify -->|"Projection to TableScan"| Pass["1 stage<br/>passthrough"]
+    Classify -->|"Projection to Aggregate"| Agg["2 stages<br/>partial, final"]
+    Classify -->|"Projection to Join"| Join["3 stages<br/>2 scans, join"]
+    Classify -->|"anything else"| Err["UnsupportedSQLError"]
+    Pass --> Graph["StageGraph.validate()"]
+    Agg --> Graph
+    Join --> Graph
+```
+
 Three shapes are recognized.
 
 ### Passthrough: `Projection -> [Filter] -> TableScan`
@@ -67,6 +81,21 @@ SELECT customer_id, sum(amount) AS __p_0 FROM orders GROUP BY customer_id
 SELECT customer_id, sum(__p_0) AS total FROM q_partials GROUP BY customer_id
 ```
 
+```mermaid
+flowchart LR
+    subgraph plan [DataFusion logical plan]
+        direction TB
+        Proj["Projection"] --> Aggr["Aggregate"] --> Scan["TableScan orders"]
+    end
+    subgraph emitted [Emitted StageGraph]
+        direction TB
+        Partial["q_partial<br/>sum(amount) AS __p_0<br/>GROUP BY customer_id"]
+        Final["q_final<br/>sum(__p_0) AS total<br/>GROUP BY customer_id"]
+        Partial -->|"hash_shuffle on customer_id"| Final
+    end
+    plan ==> emitted
+```
+
 Note the combine function is not always the same as the partial function: a `COUNT` is combined with
 a `SUM`, because summing per-partition counts gives the total count. That mapping is the whole trick,
 and it is the reason `AVG` is rejected — an average of averages is wrong, so it would need to be
@@ -88,6 +117,19 @@ the same number of buckets. Because equal keys hash to the same bucket, matching
 sides land in the same bucket — so the join stage can read one bucket from each side, run the
 original user SQL over just those two fragments, and the union of the per-bucket results is the
 correct full join.
+
+```mermaid
+flowchart TB
+    ScanL["q_scan_orders<br/>SELECT * FROM orders"]
+    ScanR["q_scan_customers<br/>SELECT * FROM customers"]
+    JoinStage["q_join<br/>runs the original user SQL<br/>on one bucket from each side"]
+    ScanL -->|"hash_shuffle on customer_id"| JoinStage
+    ScanR -->|"hash_shuffle on id"| JoinStage
+```
+
+Both scans shuffle into the *same* width, which is what co-locates matching rows. The DAG factory
+enforces this by giving both stages a single shared width planner — see
+[dag-mapping.md](dag-mapping.md).
 
 Join keys are read from the **optimized** plan, not the raw one. In the unoptimized plan the
 equality still lives in a filter above the join; the optimizer is what turns it into `Join.on`.

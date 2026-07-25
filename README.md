@@ -63,13 +63,13 @@ dag = dag_from_stages(
 That `GROUP BY` compiles into two stages, and the DAG makes the classic two-phase aggregation
 visible:
 
-```
-make_work_dir
-  -> plan_partitions_q_partial
-  -> stage_q_partial   (read -> compute -> write, one instance per source partition)
-  -> gather_shuffle_q_final
-  -> stage_q_final     (read -> compute -> write, one instance per non-empty bucket)
-  -> finalize
+```mermaid
+flowchart LR
+    WD["make_work_dir"] --> PP["plan_partitions_q_partial"]
+    PP --> SP["stage_q_partial<br/>read, compute, write<br/>one instance per source partition"]
+    SP --> GS["gather_shuffle_q_final"]
+    GS --> SF["stage_q_final<br/>read, compute, write<br/>one instance per non-empty bucket"]
+    SF --> FIN["finalize"]
 ```
 
 The partial stage aggregates each source partition independently and hash-partitions its output by
