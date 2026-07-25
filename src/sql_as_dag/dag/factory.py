@@ -1,19 +1,16 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Build an Airflow DAG from a ``StageGraph``.
 
@@ -106,10 +103,15 @@ def dag_from_stages(
                 run_id = str(get_current_context().get("run_id", "run"))
             return _mint_work_dir(work_dir_base, dag_id, run_id)
 
-        @task(task_id="finalize")
-        def finalize(partition_metas: list[dict]) -> dict:
+        # trigger_rule: a query that legitimately returns no rows expands the terminal stage to
+        # zero mapped instances, which Airflow marks SKIPPED. Under the default all_success rule
+        # finalize would be skipped too, leaving no _SUCCESS marker and no sink commit — making
+        # "returned nothing" indistinguishable from "never ran". 'none_failed' still refuses to
+        # commit when an upstream actually failed.
+        @task(task_id="finalize", trigger_rule="none_failed")
+        def finalize(partition_metas: list[dict] | None) -> dict:
             connector = get_sink(sink_connector)(**sink_options)
-            return connector.finalize(partition_metas)
+            return connector.finalize(list(partition_metas or []))
 
         work_dir = make_work_dir()
 
@@ -359,7 +361,13 @@ def _copartition_groups(graph: StageGraph) -> dict[str, list[Stage]]:
                 f"shuffling stage {stage.stage_id!r} is not source-fed; multi-level shuffles "
                 "are not supported yet"
             )
-        groups[consumer_of[stage.stage_id]].append(stage)
+        consumer = consumer_of.get(stage.stage_id)
+        if consumer is None:
+            raise NotImplementedError(
+                f"shuffling stage {stage.stage_id!r} has no downstream consumer; every "
+                "non-sink stage must feed another stage"
+            )
+        groups[consumer].append(stage)
     return dict(groups)
 
 
@@ -394,4 +402,26 @@ def _check_supported(graph: StageGraph) -> None:
                 f"non-sink stage {stage.stage_id!r} must shuffle its output (hash_shuffle); "
                 f"pipeline chaining between stages is not supported yet, got "
                 f"{stage.output_exchange.kind!r}"
+            )
+
+    # Stages feeding the same consumer are co-partitioned: the reduce side pairs their buckets
+    # by bucket id, so a disagreement on width or key arity would pair unrelated keys and
+    # silently drop rows. The compiler always emits matching widths; a hand-built StageGraph
+    # can get this wrong, so reject it at DAG-parse time rather than returning a wrong answer.
+    for consumer, members in _copartition_groups(graph).items():
+        if len(members) < 2:
+            continue
+        widths = {s.output_exchange.num_buckets for s in members}
+        if len(widths) > 1:
+            detail = ", ".join(f"{s.stage_id}={s.output_exchange.num_buckets}" for s in members)
+            raise ValueError(
+                f"co-partitioned stages feeding {consumer!r} disagree on shuffle width "
+                f"({detail}); they must all use the same num_buckets or the join loses rows"
+            )
+        arities = {len(s.output_exchange.keys) for s in members}
+        if len(arities) > 1:
+            detail = ", ".join(f"{s.stage_id}={len(s.output_exchange.keys)}" for s in members)
+            raise ValueError(
+                f"co-partitioned stages feeding {consumer!r} disagree on the number of shuffle "
+                f"keys ({detail}); the keys are hashed positionally, so the counts must match"
             )

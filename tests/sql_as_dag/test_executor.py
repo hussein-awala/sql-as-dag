@@ -1,19 +1,16 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 import pyarrow as pa
@@ -51,3 +48,32 @@ def test_multiple_inputs_can_be_registered() -> None:
     )
     assert result.num_rows == 1
     assert result.column("id").to_pylist() == [2]
+
+
+def test_empty_input_returns_empty_result() -> None:
+    """
+    A zero-row input must produce an empty result, not a crash.
+
+    A zero-row Arrow table has no record batches, and registering an empty batch list makes
+    DataFusion raise a Rust panic (a BaseException that ordinary error handling misses), so the
+    executor registers a schema-carrying empty batch instead. Reachable whenever a source file
+    happens to hold no rows.
+    """
+    empty = pa.table({"customer_id": pa.array([], pa.string()), "amount": pa.array([], pa.int64())})
+    result = execute_sql(
+        {"orders": empty},
+        "SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id",
+    )
+    assert result.num_rows == 0
+    assert result.column_names == ["customer_id", "total"]
+
+
+def test_empty_and_nonempty_inputs_mix() -> None:
+    """An empty side must not break a query that also registers a non-empty table."""
+    left = pa.table({"id": pa.array([], pa.int64()), "v": pa.array([], pa.string())})
+    right = pa.table({"id": [1, 2], "w": ["p", "q"]})
+    result = execute_sql(
+        {"left": left, "right": right},
+        "SELECT left.id, v, w FROM left JOIN right ON left.id = right.id",
+    )
+    assert result.num_rows == 0

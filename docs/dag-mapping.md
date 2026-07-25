@@ -76,6 +76,20 @@ their downstream consumer and creates **one** width planner per group, shared by
 - A join has two scans feeding one join stage, so its group has two members — and both get the same
   width from the same planner task.
 
+Sharing one planner makes disagreement impossible for compiled graphs, but a hand-built
+`StageGraph` can still declare different `num_buckets` (or a different number of shuffle keys) on
+two stages feeding the same consumer. That is rejected at DAG-parse time with a `ValueError`
+rather than allowed to silently lose rows.
+
+## Empty results
+
+A query that legitimately matches no rows expands the terminal stage to zero mapped instances,
+which Airflow marks as skipped. `finalize` therefore uses the `none_failed` trigger rule so it
+still runs and still commits: the Parquet sink writes its `_SUCCESS` marker and reports zero rows.
+An upstream *failure* still prevents the commit. The one case that cannot succeed is an empty
+result destined for an Iceberg table that does not exist yet — there is no data file to infer a
+schema from, so it raises with an explanation instead of doing nothing.
+
 ## The work directory
 
 `make_work_dir` mints one scratch location per run. With no `work_dir_base`, it is a local temp

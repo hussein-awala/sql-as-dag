@@ -91,8 +91,9 @@ Concretely, each mapped stage instance returns a `StageOutput`:
 }
 ```
 
-Those row counts are not just for humans — the planner tasks use them to choose the shuffle width
-and to decide between a broadcast and a shuffle join. See [shuffle.md](shuffle.md).
+Those row counts are not just for humans — the reduce-side planner uses them to decide between a
+broadcast and a shuffle join. The shuffle *width* is chosen earlier, before any map task has run,
+from source metadata rather than from these counts. See [shuffle.md](shuffle.md).
 
 ## Why tasks are self-contained
 

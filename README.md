@@ -81,8 +81,8 @@ the same bucket, the per-bucket results simply concatenate into the correct answ
 - `SELECT`, `WHERE`, projection, and column aliases.
 - `GROUP BY` with `SUM`, `COUNT` (including `COUNT(*)`), `MIN`, `MAX`, and `WHERE` combined with
   `GROUP BY`.
-- A single INNER equi-join on same-typed keys, with the broadcast-versus-shuffle strategy chosen at
-  run time from actual row counts.
+- A single INNER equi-join on same-typed keys (on its own, without `WHERE` or `GROUP BY`), with the
+  broadcast-versus-shuffle strategy chosen at run time from actual row counts.
 - Runtime-adaptive shuffle width, by row count, byte size, or source partition count.
 - Extensible connectors: Parquet built in, Iceberg through the `iceberg` extra.
 

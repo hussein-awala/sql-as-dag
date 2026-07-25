@@ -1,19 +1,16 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 SQL → ``StageGraph`` compiler.
 
@@ -40,6 +37,7 @@ All DataFusion logical-plan introspection is confined to this module.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -118,6 +116,7 @@ def _classify(plan: Any) -> dict[str, Any]:
         # Walk through any Filter(s) down to the TableScan (so WHERE + GROUP BY is allowed).
         cur = agg_input
         while _name(cur.to_variant()) == "Filter":
+            _reject_subquery_predicate(cur)
             cur = cur.inputs()[0]
         if _name(cur.to_variant()) != "TableScan":
             raise UnsupportedSQLError(
@@ -128,7 +127,7 @@ def _classify(plan: Any) -> dict[str, Any]:
             "table_name": _call(cur.to_variant().table_name),
             "group_keys": _extract_group_keys(inner),
             "aggregates": _extract_aggregates(inner),
-            "output_aliases": _extract_output_aliases(proj),
+            "output_columns": _extract_output_columns(proj),
             # When a WHERE is present, the filtered-scan subtree is unparsed into the partial SQL.
             "filtered_scan": agg_input if has_filter else None,
         }
@@ -136,12 +135,33 @@ def _classify(plan: Any) -> dict[str, Any]:
     if inner_name in {"Filter", "TableScan"}:
         cur = inner_plan
         while _name(cur.to_variant()) == "Filter":
+            _reject_subquery_predicate(cur)
             cur = cur.inputs()[0]
         if _name(cur.to_variant()) != "TableScan":
             raise UnsupportedSQLError(f"expected TableScan under Projection, got {_name(cur.to_variant())}")
         return {"kind": "passthrough"}
 
     raise UnsupportedSQLError(f"unsupported plan shape: Projection → {inner_name}")
+
+
+def _reject_subquery_predicate(filter_node: Any) -> None:
+    """
+    Reject a ``WHERE`` predicate that embeds a subquery.
+
+    A filter is only safe to push into a per-partition stage when it is row-local. A subquery is
+    not: the stage SQL runs once per partition, so ``WHERE amount > (SELECT AVG(amount) FROM
+    orders)`` would compare each row against *its own partition's* average instead of the global
+    one, and return a different set of rows than a single-node engine — silently.
+
+    DataFusion keeps such a subquery inside the predicate expression (rendered ``(<subquery>)``)
+    rather than as a relational input, so walking the plan's inputs never sees it.
+    """
+    predicate = _call(filter_node.to_variant().predicate)
+    if "<subquery>" in str(predicate):
+        raise UnsupportedSQLError(
+            "subquery in WHERE is not supported: it would be evaluated per partition and give a "
+            f"different answer than a single-node run ({predicate})"
+        )
 
 
 def _extract_group_keys(agg: Any) -> list[str]:
@@ -187,36 +207,64 @@ def _extract_aggregates(agg: Any) -> list[tuple[str, str, str]]:
     return out
 
 
-def _extract_output_aliases(proj: Any) -> dict[str, str]:
-    """Map ``Aggregate.schema_name`` (e.g. 'sum(orders.amount)') → user-visible name."""
-    aliases: dict[str, str] = {}
+def _extract_output_columns(proj: Any) -> list[tuple[str, str, str]]:
+    """
+    Return the projection as ``[(kind, key, out_name), ...]`` in the order the user wrote it.
+
+    ``kind`` is ``"column"`` (a group key, ``key`` is its column name) or ``"aggregate"``
+    (``key`` is the aggregate's ``schema_name``, e.g. ``'sum(orders.amount)'``). ``out_name`` is
+    the user-visible output name — the explicit alias when there is one, otherwise the
+    expression's own name, which is what a single-node engine would have produced.
+
+    A list rather than a dict, because the projection is ordered and may legitimately contain
+    the same aggregate twice under different aliases.
+    """
+    out: list[tuple[str, str, str]] = []
     for p in _call(proj.projections):
         pv = p.to_variant()
         pn = _name(pv)
         if pn == "Column":
             n = _call(pv.name)
-            aliases[n] = n
+            out.append(("column", n, n))
         elif pn == "Alias":
             alias_name = _call(pv.alias)
             inner = _call(pv.expr)
             inner_var = inner.to_variant()
             if _name(inner_var) == "Column":
-                aliases[_call(inner_var.name)] = alias_name
+                out.append(("column", _call(inner_var.name), alias_name))
             else:
                 # Aggregate (e.g. COUNT(*)) projected with an alias arrives wrapped in nested
                 # aliases; unwrap to the underlying expr whose schema_name matches the
-                # aggregate's (so the final-stage alias lookup hits).
+                # aggregate's (so the final-stage lookup hits).
                 target = inner
                 tv = inner_var
                 while _name(tv) == "Alias":
                     target = _call(tv.expr)
                     tv = target.to_variant()
-                aliases[target.schema_name()] = alias_name
+                out.append(("aggregate", target.schema_name(), alias_name))
+        elif pn == "AggregateFunction":
+            # An unaliased aggregate, e.g. ``SELECT customer_id, SUM(amount) ... GROUP BY``.
+            # Its output name is the expression text itself, which needs quoting downstream.
+            name = p.schema_name()
+            out.append(("aggregate", name, name))
         else:
             raise UnsupportedSQLError(
                 f"projection items must be columns or aliases, got {pn}: {p.canonical_name()!r}"
             )
-    return aliases
+    return out
+
+
+#: An identifier we can emit bare: DataFusion lower-cases unquoted identifiers, so anything
+#: with uppercase or punctuation (notably an unaliased aggregate's ``sum(orders.amount)``) must
+#: be double-quoted to survive as the user's requested output name.
+_BARE_IDENT = re.compile(r"[a-z_][a-z0-9_]*\Z")
+
+
+def _quote_ident(name: str) -> str:
+    """Quote ``name`` for use as a SQL identifier, only when it cannot be emitted bare."""
+    if _BARE_IDENT.match(name):
+        return name
+    return '"' + name.replace('"', '""') + '"'
 
 
 def _emit_passthrough(sql: str, source: Source, prefix: str) -> list[Stage]:
@@ -233,7 +281,7 @@ def _emit_passthrough(sql: str, source: Source, prefix: str) -> list[Stage]:
 def _emit_aggregate(info: dict[str, Any], source: Source, num_buckets: int, prefix: str) -> list[Stage]:
     group_keys: list[str] = info["group_keys"]
     aggregates: list[tuple[str, str, str]] = info["aggregates"]
-    output_aliases: dict[str, str] = info["output_aliases"]
+    output_columns: list[tuple[str, str, str]] = info["output_columns"]
     table_name: str = info["table_name"]
 
     if table_name != source.table_name:
@@ -248,22 +296,43 @@ def _emit_aggregate(info: dict[str, Any], source: Source, num_buckets: int, pref
         from_clause = table_name
 
     # Partial SQL: groups + AGG(col) AS __p_<i>
-    partial_select: list[str] = list(group_keys)
-    partial_aggs: list[tuple[str, str, str]] = []  # (partial_col, func, schema_name)
+    group_key_sql = [_quote_ident(k) for k in group_keys]
+    partial_select: list[str] = list(group_key_sql)
+    # schema_name → (partial_col, combine_func); one entry per distinct aggregate, since
+    # DataFusion de-duplicates identical aggregate expressions in the plan.
+    partial_by_schema: dict[str, tuple[str, str]] = {}
     for i, (func, arg_col, schema_name) in enumerate(aggregates):
         partial_col = f"__p_{i}"
-        partial_select.append(f"{func}({arg_col}) AS {partial_col}")
-        partial_aggs.append((partial_col, func, schema_name))
-    partial_sql = f"SELECT {', '.join(partial_select)} FROM {from_clause} GROUP BY {', '.join(group_keys)}"
+        arg_sql = "*" if arg_col == "*" else _quote_ident(arg_col)
+        partial_select.append(f"{func}({arg_sql}) AS {partial_col}")
+        partial_by_schema[schema_name] = (partial_col, _COMBINE[func])
+    partial_sql = (
+        f"SELECT {', '.join(partial_select)} FROM {from_clause} GROUP BY {', '.join(group_key_sql)}"
+    )
 
-    # Final SQL: groups + combine(__p_<i>) AS <user alias>
+    # Final SQL: one output column per projection item, in the order the user wrote them, so
+    # column order, group-key aliases, and repeated aggregates all survive.
     partials_name = f"{prefix}_partials"
-    final_select: list[str] = list(group_keys)
-    for partial_col, func, schema_name in partial_aggs:
-        combine = _COMBINE[func]
-        out_alias = output_aliases.get(schema_name, schema_name)
-        final_select.append(f"{combine}({partial_col}) AS {out_alias}")
-    final_sql = f"SELECT {', '.join(final_select)} FROM {partials_name} GROUP BY {', '.join(group_keys)}"
+    final_select: list[str] = []
+    for kind, key, out_name in output_columns:
+        # An unaliased aggregate reaches the projection as a Column referencing the aggregate
+        # node's output name, so resolve against the aggregate set before treating a projection
+        # item as a group key.
+        entry = partial_by_schema.get(key)
+        if entry is not None:
+            partial_col, combine = entry
+            final_select.append(f"{combine}({partial_col}) AS {_quote_ident(out_name)}")
+        elif kind == "column":
+            col = _quote_ident(key)
+            final_select.append(col if out_name == key else f"{col} AS {_quote_ident(out_name)}")
+        else:
+            raise UnsupportedSQLError(
+                f"aggregate {key!r} appears in the projection but not in the aggregate node; "
+                "this query shape is not supported"
+            )
+    final_sql = (
+        f"SELECT {', '.join(final_select)} FROM {partials_name} GROUP BY {', '.join(group_key_sql)}"
+    )
 
     partial_id = f"{prefix}_partial"
     return [

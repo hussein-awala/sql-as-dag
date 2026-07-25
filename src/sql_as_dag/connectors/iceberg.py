@@ -1,26 +1,23 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Apache Iceberg source/sink connectors (optional — requires the ``iceberg`` extra).
 
 These prove the connector abstraction extends to a second table format without touching the
 compiler, factory, or runtime. ``pyiceberg`` is imported lazily so this module (and the
 connector registry) load fine even when the extra is not installed; only *using* an Iceberg
-connector requires ``pip install apache-airflow-providers-sql-as-dag[iceberg]``.
+connector requires ``pip install "sql-as-dag[iceberg]"``.
 
 Catalog configuration is plain data (``options``) so it survives XCom and DAG re-parsing:
 
@@ -83,6 +80,18 @@ class IcebergSourceConnector:
         return sum(task.file.file_size_in_bytes for task in self._table().scan().plan_files())
 
 
+def _normalize_path(path: str) -> str:
+    """Strip a ``file://`` scheme so paths compare equal however the catalog stored them."""
+    return path[7:] if path.startswith("file://") else path
+
+
+def _committed_paths(table) -> set[str]:
+    """Return the data-file paths the table's current snapshot already references."""
+    if table.current_snapshot() is None:
+        return set()
+    return {_normalize_path(task.file.file_path) for task in table.scan().plan_files()}
+
+
 class IcebergSink:
     """Writes one Parquet data file per partition, then commits them as one snapshot."""
 
@@ -109,12 +118,19 @@ class IcebergSink:
         paths = [m["path"] for m in partition_metas if m.get("rows", 0) > 0]
         catalog = _load_catalog(self._catalog_name, self._uri, self._warehouse, **self._props)
         table = self._ensure_table(catalog, paths)
-        if paths:
-            table.add_files(file_paths=paths)
+        # Only add files the current snapshot does not already reference, so a retry after a
+        # commit that succeeded but was not recorded converges instead of failing on
+        # add_files' duplicate-file check.
+        committed = _committed_paths(table)
+        new_paths = [p for p in paths if _normalize_path(p) not in committed]
+        if new_paths:
+            table.add_files(file_paths=new_paths)
         return {
             "identifier": self._identifier,
             "partitions": len(partition_metas),
             "rows": sum(m.get("rows", 0) for m in partition_metas),
+            "files_added": len(new_paths),
+            "files_already_committed": len(paths) - len(new_paths),
         }
 
     def _ensure_table(self, catalog, paths: list[str]):
@@ -124,7 +140,14 @@ class IcebergSink:
             return catalog.load_table(self._identifier)
         except NoSuchTableError:
             if not paths:
-                raise
+                # An empty result cannot create a table: the schema is inferred from a data
+                # file and there are none. Fail with an actionable message rather than the bare
+                # catalog error, since an empty result set is a legitimate query outcome.
+                raise ValueError(
+                    f"query returned no rows and Iceberg table {self._identifier!r} does not "
+                    "exist yet, so there is no schema to create it from. Pre-create the table "
+                    "(or run the query once with data) if it must exist after an empty run."
+                ) from None
             namespace = self._identifier.rsplit(".", 1)[0]
             # Namespace may already exist — that is fine.
             with suppress(Exception):

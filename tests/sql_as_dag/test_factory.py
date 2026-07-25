@@ -1,19 +1,16 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 from datetime import datetime
@@ -124,6 +121,83 @@ def test_rejects_multi_input_stage() -> None:
         dag_from_stages(graph, dag_id="multi_in", sink=_SINK, schedule=None, start_date=datetime(2026, 1, 1))
 
 
+def _join_graph(*, left_buckets: int, right_buckets: int, left_keys=("id",), right_keys=("id",)) -> StageGraph:
+    """Two scan stages feeding one join stage — the co-partitioned shape, built by hand."""
+    stages = [
+        Stage(
+            stage_id="scan_left",
+            sql="SELECT * FROM a",
+            inputs=[StageInput(table_name="a", source_id="s_a")],
+            output_exchange=Exchange(kind="hash_shuffle", keys=list(left_keys), num_buckets=left_buckets),
+        ),
+        Stage(
+            stage_id="scan_right",
+            sql="SELECT * FROM b",
+            inputs=[StageInput(table_name="b", source_id="s_b")],
+            output_exchange=Exchange(kind="hash_shuffle", keys=list(right_keys), num_buckets=right_buckets),
+        ),
+        Stage(
+            stage_id="join",
+            sql="SELECT * FROM a JOIN b ON a.id = b.id",
+            inputs=[
+                StageInput(table_name="a", upstream_stage_id="scan_left"),
+                StageInput(table_name="b", upstream_stage_id="scan_right"),
+            ],
+        ),
+    ]
+    sources = [
+        Source(source_id="s_a", table_name="a", options={"uris": ["file:///tmp/a.parquet"]}),
+        Source(source_id="s_b", table_name="b", options={"uris": ["file:///tmp/b.parquet"]}),
+    ]
+    return StageGraph(sources=sources, stages=stages, sink_stage_id="join")
+
+
+def test_rejects_copartitioned_stages_with_different_widths() -> None:
+    """
+    Co-partitioned stages must agree on the shuffle width.
+
+    The reduce side pairs buckets by id, so mismatched widths route equal keys to different
+    buckets and the join silently loses rows. The compiler always emits matching widths, but a
+    hand-built graph can get this wrong and must be refused at DAG-parse time.
+    """
+    graph = _join_graph(left_buckets=4, right_buckets=8)
+    with pytest.raises(ValueError, match="disagree on shuffle width"):
+        dag_from_stages(graph, dag_id="w_bad", sink=_SINK, schedule=None, start_date=datetime(2026, 1, 1))
+
+
+def test_rejects_copartitioned_stages_with_different_key_counts() -> None:
+    """Keys are hashed positionally, so the number of keys must match across the group."""
+    graph = _join_graph(left_buckets=4, right_buckets=4, left_keys=("id",), right_keys=("id", "extra"))
+    with pytest.raises(ValueError, match="number of shuffle keys"):
+        dag_from_stages(graph, dag_id="k_bad", sink=_SINK, schedule=None, start_date=datetime(2026, 1, 1))
+
+
+def test_accepts_copartitioned_stages_with_matching_width() -> None:
+    dag = dag_from_stages(
+        _join_graph(left_buckets=4, right_buckets=4),
+        dag_id="w_ok",
+        sink=_SINK,
+        schedule=None,
+        start_date=datetime(2026, 1, 1),
+    )
+    assert "gather_shuffle_join" in set(dag.task_ids)
+
+
+def test_rejects_shuffling_stage_with_no_consumer() -> None:
+    """An unconsumed shuffling stage is a clear error, not a KeyError from a dict lookup."""
+    graph = _join_graph(left_buckets=4, right_buckets=4)
+    graph.stages.append(
+        Stage(
+            stage_id="orphan",
+            sql="SELECT * FROM a",
+            inputs=[StageInput(table_name="a", source_id="s_a")],
+            output_exchange=Exchange(kind="hash_shuffle", keys=["id"], num_buckets=4),
+        )
+    )
+    with pytest.raises(NotImplementedError, match="no downstream consumer"):
+        dag_from_stages(graph, dag_id="orph", sink=_SINK, schedule=None, start_date=datetime(2026, 1, 1))
+
+
 def test_mint_work_dir_uses_base_uri(tmp_path: Path) -> None:
     base = (tmp_path / "wh").resolve().as_uri()
     work_dir = _mint_work_dir(base, "my_dag", "manual__2026-01-01T00:00:00+00:00")
@@ -144,8 +218,8 @@ def test_runtime_pipeline_end_to_end(tmp_path: Path) -> None:
     """
     Exercise the exact data path the mapped read->compute->write tasks run (source
     connector -> DataFusion -> sink -> finalize), proving the partitioned scan+filter
-    matches the single-node result. DAG-level orchestration is covered by the system test
-    example; here we validate the runtime composition without a scheduler.
+    matches the single-node result. This composes the runtime pieces directly; the mapped
+    task callables themselves are driven in test_mapped_tasks_execute_end_to_end.
     """
     inputs_dir = tmp_path / "orders"
     inputs_dir.mkdir()

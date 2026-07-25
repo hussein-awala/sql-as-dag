@@ -1,19 +1,16 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
-# distributed with this work for additional information
-# regarding copyright ownership.  The ASF licenses this file
-# to you under the Apache License, Version 2.0 (the
-# "License"); you may not use this file except in compliance
-# with the License.  You may obtain a copy of the License at
+# Copyright 2026 Hussein Awala
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing,
-# software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-# KIND, either express or implied.  See the License for the
-# specific language governing permissions and limitations
-# under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Internal Parquet IO over Airflow's ``ObjectStoragePath``.
 
@@ -46,7 +43,16 @@ def read_concat(uris: Sequence[str]) -> pa.Table:
     if not uris:
         raise ValueError("read_concat requires at least one uri")
     tables = [read_table(u) for u in uris]
-    return tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+    if len(tables) == 1:
+        return tables[0]
+    for uri, table in zip(uris[1:], tables[1:], strict=True):
+        if not table.schema.equals(tables[0].schema):
+            raise ValueError(
+                f"cannot concatenate inputs with different schemas: {uris[0]} has "
+                f"{tables[0].schema.names} but {uri} has {table.schema.names}. All files read "
+                "into one partition must share a schema."
+            )
+    return pa.concat_tables(tables)
 
 
 def write_table(table: pa.Table, uri: str) -> str:

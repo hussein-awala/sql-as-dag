@@ -1,5 +1,15 @@
-Apache Airflow
-Copyright 2016-2026 The Apache Software Foundation
+sql-as-dag
+Copyright 2026 Hussein Awala
 
-This product includes software developed at
-The Apache Software Foundation (http://www.apache.org/).
+This product is licensed under the Apache License, Version 2.0 (see the LICENSE
+file). It is an independent project and is not affiliated with, endorsed by, or
+a product of The Apache Software Foundation.
+
+This product is built to run on Apache Airflow and executes SQL with Apache
+DataFusion and Apache Arrow, which are separately licensed works of The Apache
+Software Foundation (https://www.apache.org/). They are dependencies and their
+source is not included or redistributed here.
+
+Portions of the packaging layout and the Airflow provider integration points
+follow conventions established by the Apache Airflow project (Apache License
+2.0).

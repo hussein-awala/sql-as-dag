@@ -39,6 +39,10 @@ iceberg = ["pyiceberg>=0.8.0"]
 [project.urls]
 Homepage = "https://github.com/hussein-awala/sql-as-dag"
 Source = "https://github.com/hussein-awala/sql-as-dag"
+# Airflow's provider discovery reads Project-URL: Documentation to populate the provider's
+# documentation-url, so this is what `airflow providers list` shows.
+Documentation = "https://github.com/hussein-awala/sql-as-dag/tree/main/docs"
+Changelog = "https://github.com/hussein-awala/sql-as-dag/blob/main/CHANGELOG.md"
 "Talk" = "https://airflowsummit.org/sessions/2026/a-sql-query-is-just-a-dag/"
 
 # Registers this package as a third-party Airflow provider (operators/links/metadata) when
@@ -55,9 +59,6 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sql_as_dag"]
-
-[tool.uv.sources]
-# apache-airflow resolves from PyPI (no workspace); nothing special needed here.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

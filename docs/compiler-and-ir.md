@@ -104,7 +104,10 @@ split into a `SUM` and a `COUNT` and recombined. Likewise `DISTINCT` aggregates 
 
 The `__p_<i>` aliases are internal plumbing between the two stages. The user's requested output
 names are recovered from the projection and applied in the final stage, so `SUM(amount) AS total`
-comes out as `total`.
+comes out as `total`. The final `SELECT` is rebuilt in projection order, one column per projection
+item, so column order, aliased group keys (`customer_id AS cid`), and a repeated aggregate under
+two aliases all survive. An unaliased aggregate keeps the name a single-node engine would give it
+(`sum(orders.amount)`), which is not a bare identifier and so is emitted quoted.
 
 When a `WHERE` accompanies a `GROUP BY`, the filtered-scan subtree is unparsed back into SQL and
 folded into the partial stage's `FROM` clause, so filtering happens as early as possible — before

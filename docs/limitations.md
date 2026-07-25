@@ -9,8 +9,11 @@ silently returns a wrong number.
 - `SELECT` with projection and `WHERE`.
 - `GROUP BY` with `SUM`, `COUNT` (including `COUNT(*)`), `MIN`, `MAX`.
 - `WHERE` together with `GROUP BY` (the filter is folded into the map-side stage).
-- Column aliases, which are preserved through to the output.
-- A single INNER equi-join between two tables on one key pair of matching types.
+- Output column names and order match what a single-node engine would return: explicit aliases
+  are preserved, an unaliased aggregate keeps its expression name (`sum(orders.amount)`), and
+  the same aggregate may appear more than once under different aliases.
+- A single INNER equi-join between two tables on one key pair of matching types, with no
+  `WHERE` or `GROUP BY` in the same query.
 
 ## Rejected, and why
 
@@ -26,6 +29,9 @@ Each of these raises `UnsupportedSQLError`:
 | Non-INNER joins (`LEFT`, `RIGHT`, `FULL`) | Need null-padding logic on the reduce side. |
 | Multi-key joins | Only a single equi-key pair is handled. |
 | Self-joins | Both sides would resolve to the same table name. |
+| A join combined with `WHERE` or `GROUP BY` | Only a bare two-table join is recognised; a filter or aggregation above the join is a plan shape the compiler does not lower. |
+| Joins of three or more tables | Only one join node is lowered; a second one cannot resolve to a single source table. |
+| `LIMIT` and `SELECT DISTINCT` | The top-level plan node must be a projection; both wrap it in a node the compiler refuses. |
 | Join keys of different types | DataFusion inserts a `CAST`; hashing each side independently on differently-typed values would route equal keys to different buckets and silently drop matches. Cast both keys explicitly in the query instead. |
 | `HAVING`, sub-queries, window functions, `ORDER BY` as a global sort, set operations | Not implemented. |
 | More than one source in a non-join query | Not a supported plan shape. |

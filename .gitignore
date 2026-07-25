@@ -10,9 +10,13 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# Local scratch
+# Local scratch. *.parquet is anchored to the repo root so a deliberate test fixture under
+# tests/ is not silently ignored.
 /tmp/
-*.parquet
+/*.parquet
+
+# Backups left behind if scripts/build-breeze-wheel.sh is interrupted mid-build
+*.bak
 
 # Private working notes (design narrative lives in docs/)
 /.airflow-sql-as-dag/

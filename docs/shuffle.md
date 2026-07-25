@@ -59,7 +59,7 @@ too many and you pay Airflow's per-task overhead for tasks that process a handfu
 | `static` | Always `num_buckets` |
 | `rows` | `ceil(total_rows / target_rows_per_bucket)`, capped at `num_buckets` |
 | `bytes` | `ceil(total_bytes / target_bytes_per_bucket)`, capped at `num_buckets` |
-| `partitions` | The number of source partitions, capped at `num_buckets` |
+| `partitions` | The number of source partitions, capped at `num_buckets`. For a join, the partition counts of **both** sources are summed, since one width planner serves the whole co-partition group. |
 
 For the adaptive strategies, `num_buckets` is a **cap**, not a target. The result is always clamped
 to at least 1.

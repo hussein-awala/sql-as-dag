@@ -41,10 +41,13 @@ sequenceDiagram
 
     Sched->>Src: schema()
     Note over Sched,Src: metadata only, no data read
+    opt adaptive bucketing only
+        Planner->>Src: list_partitions() + estimate_total_rows() / _bytes()
+        Note over Planner,Src: width planner, metadata only
+    end
     Planner->>Src: list_partitions()
     Src-->>Planner: [PartitionRef, ...]
-    Planner->>Src: estimate_total_rows() / _bytes()
-    Note over Planner,Src: width planner only, metadata only
+    Note over Planner,Src: partition planner, one mapped instance per ref
     loop one per partition
         Mapped->>Src: read_partition(ref)
         Src-->>Mapped: Arrow table
