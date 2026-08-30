@@ -72,9 +72,7 @@ def _run_dag_tasks(dag: Any, graph: StageGraph) -> tuple[dict, dict[str, list[di
     for stage in graph.stages:
         sid = stage.stage_id
         if stage.inputs[0].source_id is not None:
-            kwargs_list = callable_for(f"plan_partitions_{sid}")(
-                work_dir, stage.output_exchange.num_buckets
-            )
+            kwargs_list = callable_for(f"plan_partitions_{sid}")(work_dir, stage.output_exchange.num_buckets)
         else:
             upstream = [stage_outputs[i.upstream_stage_id] for i in stage.inputs]
             kwargs_list = callable_for(f"gather_shuffle_{sid}")(upstream, work_dir)
@@ -167,10 +165,7 @@ def test_join_mapped_tasks_execute_end_to_end(tmp_path: Path) -> None:
         {"customer_id": ["a", "b"], "name": ["Ann", "Bob"]},
         {"customer_id": ["c", "e"], "name": ["Cid", "Eve"]},
     ]
-    sql = (
-        "SELECT o.customer_id, o.amount, c.name FROM orders o "
-        "JOIN customers c ON o.customer_id = c.customer_id"
-    )
+    sql = "SELECT o.customer_id, o.amount, c.name FROM orders o JOIN customers c ON o.customer_id = c.customer_id"
     sources = [
         Source(source_id="orders_src", table_name="orders", options={"uris": _materialize(tmp_path, "orders", orders)}),
         Source(

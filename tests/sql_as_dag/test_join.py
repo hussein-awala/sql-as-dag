@@ -151,9 +151,7 @@ def test_matching_type_join_keys_compile(tmp_path: Path) -> None:
     pq.write_table(pa.table({"customer_id": pa.array([1, 2], pa.int64()), "amount": [10, 20]}), op)
     pq.write_table(pa.table({"id": pa.array([1, 2], pa.int64()), "name": ["A", "B"]}), cp)
     orders = Source(source_id="orders_src", table_name="orders", options={"uris": [op.resolve().as_uri()]})
-    customers = Source(
-        source_id="customers_src", table_name="customers", options={"uris": [cp.resolve().as_uri()]}
-    )
+    customers = Source(source_id="customers_src", table_name="customers", options={"uris": [cp.resolve().as_uri()]})
     graph = compile_sql(_JOIN_SQL, [orders, customers], stage_id_prefix="oc")
     assert [s.stage_id for s in graph.stages] == ["oc_scan_orders", "oc_scan_customers", "oc_join"]
 
@@ -185,9 +183,7 @@ def test_join_runtime_pipeline_matches_single_node(tmp_path: Path) -> None:
     num_buckets = 3
     graph = compile_sql(_JOIN_SQL, _sources(tmp_path), num_buckets=num_buckets, stage_id_prefix="oc")
     orders_out = _run_scan(tmp_path, graph.get_stage("oc_scan_orders"), "orders", _ORDERS, num_buckets)
-    customers_out = _run_scan(
-        tmp_path, graph.get_stage("oc_scan_customers"), "customers", _CUSTOMERS, num_buckets
-    )
+    customers_out = _run_scan(tmp_path, graph.get_stage("oc_scan_customers"), "customers", _CUSTOMERS, num_buckets)
 
     plan = gather_multi(
         {"orders": orders_out, "customers": customers_out},
@@ -203,9 +199,7 @@ def test_broadcast_join_runtime_matches_shuffle(tmp_path: Path) -> None:
     num_buckets = 3
     graph = compile_sql(_JOIN_SQL, _sources(tmp_path), num_buckets=num_buckets, stage_id_prefix="oc")
     orders_out = _run_scan(tmp_path, graph.get_stage("oc_scan_orders"), "orders", _ORDERS, num_buckets)
-    customers_out = _run_scan(
-        tmp_path, graph.get_stage("oc_scan_customers"), "customers", _CUSTOMERS, num_buckets
-    )
+    customers_out = _run_scan(tmp_path, graph.get_stage("oc_scan_customers"), "customers", _CUSTOMERS, num_buckets)
 
     plan = choose_join_strategy(
         orders_out,
@@ -222,12 +216,8 @@ def test_broadcast_join_runtime_matches_shuffle(tmp_path: Path) -> None:
 
 
 def test_choose_join_strategy_shuffle_above_threshold() -> None:
-    left = [
-        {"partition_id": 0, "files": [{"path": "l0", "bucket": 0, "rows": 100}], "rows_in": 0, "rows_out": 0}
-    ]
-    right = [
-        {"partition_id": 0, "files": [{"path": "r0", "bucket": 0, "rows": 50}], "rows_in": 0, "rows_out": 0}
-    ]
+    left = [{"partition_id": 0, "files": [{"path": "l0", "bucket": 0, "rows": 100}], "rows_in": 0, "rows_out": 0}]
+    right = [{"partition_id": 0, "files": [{"path": "r0", "bucket": 0, "rows": 50}], "rows_in": 0, "rows_out": 0}]
     plan = choose_join_strategy(
         left,
         right,

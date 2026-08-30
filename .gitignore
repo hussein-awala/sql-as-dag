@@ -9,6 +9,8 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+/.airflow-home/
+/.idea/
 
 # Local scratch. *.parquet is anchored to the repo root so a deliberate test fixture under
 # tests/ is not silently ignored.

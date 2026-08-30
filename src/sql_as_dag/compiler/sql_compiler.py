@@ -231,9 +231,7 @@ def _extract_aggregates(agg: Any) -> list[tuple[str, str, str]]:
     for ax in _call(agg.agg_expressions):
         func = agg.agg_func_name(ax)
         if func not in _COMBINE:
-            raise UnsupportedSQLError(
-                f"aggregate function {func!r} not supported (supported: {sorted(_COMBINE)})"
-            )
+            raise UnsupportedSQLError(f"aggregate function {func!r} not supported (supported: {sorted(_COMBINE)})")
         # DISTINCT aggregates (COUNT(DISTINCT x), SUM(DISTINCT x), ...) are not sum-combinable
         # across partial/final, so reject them outright rather than return wrong numbers.
         if "DISTINCT" in ax.schema_name():
@@ -247,9 +245,7 @@ def _extract_aggregates(agg: Any) -> list[tuple[str, str, str]]:
             raise UnsupportedSQLError(f"aggregate {func} with {len(args)} args not supported")
         argv = args[0].to_variant()
         if _name(argv) != "Column":
-            raise UnsupportedSQLError(
-                f"aggregate argument must be a plain column, got {args[0].canonical_name()!r}"
-            )
+            raise UnsupportedSQLError(f"aggregate argument must be a plain column, got {args[0].canonical_name()!r}")
         out.append((func, _call(argv.name), ax.schema_name()))
     return out
 
@@ -295,9 +291,7 @@ def _extract_output_columns(proj: Any) -> list[tuple[str, str, str]]:
             name = p.schema_name()
             out.append(("aggregate", name, name))
         else:
-            raise UnsupportedSQLError(
-                f"projection items must be columns or aliases, got {pn}: {p.canonical_name()!r}"
-            )
+            raise UnsupportedSQLError(f"projection items must be columns or aliases, got {pn}: {p.canonical_name()!r}")
     return out
 
 
@@ -334,9 +328,7 @@ def _emit_aggregate(info: dict[str, Any], source: Source, num_buckets: int, pref
     table_name: str = info["table_name"]
 
     if table_name != source.table_name:
-        raise UnsupportedSQLError(
-            f"query references table {table_name!r} but source declares {source.table_name!r}"
-        )
+        raise UnsupportedSQLError(f"query references table {table_name!r} but source declares {source.table_name!r}")
 
     # FROM clause: the bare table, or the unparsed filtered-scan subquery when a WHERE is present.
     if info.get("filtered_scan") is not None:
@@ -355,9 +347,7 @@ def _emit_aggregate(info: dict[str, Any], source: Source, num_buckets: int, pref
         arg_sql = "*" if arg_col == "*" else _quote_ident(arg_col)
         partial_select.append(f"{func}({arg_sql}) AS {partial_col}")
         partial_by_schema[schema_name] = (partial_col, _COMBINE[func])
-    partial_sql = (
-        f"SELECT {', '.join(partial_select)} FROM {from_clause} GROUP BY {', '.join(group_key_sql)}"
-    )
+    partial_sql = f"SELECT {', '.join(partial_select)} FROM {from_clause} GROUP BY {', '.join(group_key_sql)}"
 
     # Final SQL: one output column per projection item, in the order the user wrote them, so
     # column order, group-key aliases, and repeated aggregates all survive.
@@ -379,9 +369,7 @@ def _emit_aggregate(info: dict[str, Any], source: Source, num_buckets: int, pref
                 f"aggregate {key!r} appears in the projection but not in the aggregate node; "
                 "this query shape is not supported"
             )
-    final_sql = (
-        f"SELECT {', '.join(final_select)} FROM {partials_name} GROUP BY {', '.join(group_key_sql)}"
-    )
+    final_sql = f"SELECT {', '.join(final_select)} FROM {partials_name} GROUP BY {', '.join(group_key_sql)}"
 
     partial_id = f"{prefix}_partial"
     return [

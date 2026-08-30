@@ -372,8 +372,7 @@ def _copartition_groups(graph: StageGraph) -> dict[str, list[Stage]]:
             continue
         if stage.inputs[0].source_id is None:
             raise NotImplementedError(
-                f"shuffling stage {stage.stage_id!r} is not source-fed; multi-level shuffles "
-                "are not supported yet"
+                f"shuffling stage {stage.stage_id!r} is not source-fed; multi-level shuffles are not supported yet"
             )
         consumer = consumer_of.get(stage.stage_id)
         if consumer is None:
@@ -392,9 +391,7 @@ def _check_supported(graph: StageGraph) -> None:
         source_inputs = [i for i in stage.inputs if i.source_id is not None]
         upstream_inputs = [i for i in stage.inputs if i.upstream_stage_id is not None]
         if source_inputs and upstream_inputs:
-            raise NotImplementedError(
-                f"stage {stage.stage_id!r} mixes source and upstream inputs; not supported"
-            )
+            raise NotImplementedError(f"stage {stage.stage_id!r} mixes source and upstream inputs; not supported")
         if source_inputs and len(source_inputs) != 1:
             raise NotImplementedError(
                 f"stage {stage.stage_id!r} reads from {len(source_inputs)} sources directly; "

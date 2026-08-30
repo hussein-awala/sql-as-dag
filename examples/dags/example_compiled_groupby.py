@@ -72,5 +72,5 @@ dag = dag_from_stages(
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=["sql_as_dag", "demo", "compiled"],
+    tags=["sql_as_dag", "example", "compiled"],
 )

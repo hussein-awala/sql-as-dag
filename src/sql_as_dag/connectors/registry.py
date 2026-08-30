@@ -49,9 +49,7 @@ def get_source(name: str) -> type[SourceConnector]:
     try:
         return _SOURCE_CONNECTORS[name]
     except KeyError:
-        raise KeyError(
-            f"unknown source connector {name!r} (registered: {sorted(_SOURCE_CONNECTORS)})"
-        ) from None
+        raise KeyError(f"unknown source connector {name!r} (registered: {sorted(_SOURCE_CONNECTORS)})") from None
 
 
 def get_sink(name: str) -> type[SinkConnector]:

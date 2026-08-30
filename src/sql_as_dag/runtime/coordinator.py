@@ -43,8 +43,7 @@ def _group_by_bucket(outputs: Sequence[StageOutput], num_buckets: int | None = N
             bucket = f["bucket"]
             if num_buckets is not None and bucket not in by_bucket:
                 raise ValueError(
-                    f"upstream produced bucket={bucket} but coordinator was "
-                    f"configured for {num_buckets} buckets"
+                    f"upstream produced bucket={bucket} but coordinator was configured for {num_buckets} buckets"
                 )
             by_bucket.setdefault(bucket, []).append(f["path"])
     return by_bucket
@@ -90,9 +89,7 @@ def gather_multi(
     for b in present:
         paths_by_table = {t: per_table[t].get(b, []) for t in tables}
         if all(paths_by_table[t] for t in tables):
-            plan.append(
-                {"bucket": b, "input_paths_by_table": paths_by_table, "output_dir": f"{base}/bucket_{b}"}
-            )
+            plan.append({"bucket": b, "input_paths_by_table": paths_by_table, "output_dir": f"{base}/bucket_{b}"})
     return plan
 
 

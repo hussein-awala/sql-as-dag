@@ -117,9 +117,7 @@ def test_distinct_is_rejected(orders_source: Source, sql: str) -> None:
 def test_rejects_multiple_sources_for_non_join(orders_source: Source, tmp_path: Path) -> None:
     other_path = tmp_path / "other.parquet"
     pq.write_table(pa.table({"x": [1]}), other_path)
-    other = Source(
-        source_id="other_src", table_name="other", options={"uris": [other_path.resolve().as_uri()]}
-    )
+    other = Source(source_id="other_src", table_name="other", options={"uris": [other_path.resolve().as_uri()]})
     with pytest.raises(UnsupportedSQLError, match="one source"):
         compile_sql("SELECT customer_id, amount FROM orders WHERE amount > 5", [orders_source, other])
 
@@ -213,9 +211,7 @@ def _orders_source_from(partitions: list[dict], tmp_path: Path) -> Source:
 
 def test_count_star_runtime_counts_rows(tmp_path: Path) -> None:
     source = _orders_source_from(_PARTITIONS, tmp_path)
-    graph = compile_sql(
-        "SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id", [source], num_buckets=3
-    )
+    graph = compile_sql("SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id", [source], num_buckets=3)
     assert _run_compiled_groupby(graph, _PARTITIONS, tmp_path) == {"a": 4, "b": 3, "c": 2, "d": 1}
 
 
@@ -337,8 +333,7 @@ def test_empty_result_compiles_and_runs(tmp_path: Path) -> None:
 
 _TWO_SOURCE_REJECTIONS = [
     # A join is only lowered on its own; a filter or aggregation above it is not handled.
-    "SELECT o.customer_id, c.name FROM orders o JOIN customers c ON o.customer_id = c.customer_id "
-    "WHERE o.amount > 5",
+    "SELECT o.customer_id, c.name FROM orders o JOIN customers c ON o.customer_id = c.customer_id WHERE o.amount > 5",
     "SELECT o.customer_id, SUM(o.amount) AS total FROM orders o "
     "JOIN customers c ON o.customer_id = c.customer_id GROUP BY o.customer_id",
     # Non-INNER joins need null padding on the reduce side.
@@ -417,8 +412,7 @@ def test_three_table_join_is_rejected(tmp_path: Path) -> None:
         pq.write_table(table, p)
         paths[name] = p
     sources = [
-        Source(source_id=f"{n}_src", table_name=n, options={"uris": [p.resolve().as_uri()]})
-        for n, p in paths.items()
+        Source(source_id=f"{n}_src", table_name=n, options={"uris": [p.resolve().as_uri()]}) for n, p in paths.items()
     ]
     sql = (
         "SELECT o.customer_id, c.name, r.region FROM orders o "

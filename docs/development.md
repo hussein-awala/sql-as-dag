@@ -30,6 +30,73 @@ airflow dags test sql_as_dag_adaptive_groupby
 airflow dags test sql_as_dag_iceberg_groupby       # also needs: pip install pyiceberg
 ```
 
+### Enabling the wide live-demo DAGs
+
+The wider, stage-oriented examples in [`../examples/dags/demo`](../examples/dags/demo) are disabled
+by default. Unlike the regular examples, they are intended for a live presentation and create more
+source partitions so that mapped fan-out is visible in the Grid view. Keeping them disabled prevents
+the Dag processor from repeatedly materializing their input and output files under `/tmp` during
+normal development.
+
+Set `SQL_AS_DAG_ENABLE_DEMOS` before starting Airflow or running one directly:
+
+```bash
+export SQL_AS_DAG_ENABLE_DEMOS=true
+
+airflow dags test sql_as_dag_passthrough_demo
+airflow dags test sql_as_dag_groupby_demo
+airflow dags test sql_as_dag_adaptive_groupby_demo
+```
+
+Unset the variable and restart the Dag processor to disable them again:
+
+```bash
+unset SQL_AS_DAG_ENABLE_DEMOS
+```
+
+The switch is read while each file is parsed, so changing it in a shell does not affect an already
+running Dag processor. With the switch disabled, the files create no Dag objects and do not call
+their input-materialization helpers.
+
+### Testing in Airflow standalone
+
+Airflow's standalone mode starts the API server, scheduler, Dag processor, and triggerer together,
+which is useful for checking the examples in the Grid view without setting up Breeze. From the
+repository root, use a temporary Airflow home and point Dag discovery at the examples:
+
+```bash
+export AIRFLOW_HOME=/tmp/af_demo
+export AIRFLOW__CORE__DAGS_FOLDER=$PWD/examples/dags
+export AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+uv run airflow standalone
+```
+
+Open <http://localhost:8080>. Standalone prints the generated admin credentials during startup and
+also writes them to `$AIRFLOW_HOME/simple_auth_manager_passwords.json.generated`. Stop all
+standalone components with `Ctrl+C`.
+
+To include the wide live-demo Dags, export the demo switch in the same shell before starting
+Airflow:
+
+```bash
+export SQL_AS_DAG_ENABLE_DEMOS=true
+uv run airflow standalone
+```
+
+Environment variables are inherited when the standalone components start. Restart standalone after
+changing the Dag folder or the demo switch. A second terminal running Airflow CLI commands must
+export the same `AIRFLOW_HOME`, Dag folder, and demo-switch values so that it uses the same
+configuration and metadata database.
+
+> **macOS users:** if Dag-processing subprocesses are killed while importing the examples, disable
+> Objective-C fork-safety checks and bypass proxies for local component communication before
+> starting standalone:
+>
+> ```bash
+> export no_proxy='*' OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
+> ```
+
 ## Testing the provider in Airflow Breeze
 
 [Breeze](https://github.com/apache/airflow/blob/main/dev/breeze/doc/README.rst) is the Airflow

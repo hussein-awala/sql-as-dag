@@ -113,9 +113,7 @@ def test_builds_two_stage_groupby_structure() -> None:
 
 
 def test_rejects_shuffle_exchange() -> None:
-    graph = _single_stage_graph(
-        uris=["x"], exchange=Exchange(kind="hash_shuffle", keys=["customer_id"], num_buckets=2)
-    )
+    graph = _single_stage_graph(uris=["x"], exchange=Exchange(kind="hash_shuffle", keys=["customer_id"], num_buckets=2))
     with pytest.raises(NotImplementedError, match="pipeline"):
         dag_from_stages(graph, dag_id="shuf", sink=_SINK, schedule=None, start_date=datetime(2026, 1, 1))
 
@@ -281,9 +279,7 @@ def test_run_key_reaches_every_partition_of_every_stage(tmp_path: Path) -> None:
     expected = run_key(work_dir)
 
     scan_kwargs = [
-        kw
-        for sid in ("scan_o", "scan_c")
-        for kw in dag.get_task(f"plan_partitions_{sid}").python_callable(work_dir, 2)
+        kw for sid in ("scan_o", "scan_c") for kw in dag.get_task(f"plan_partitions_{sid}").python_callable(work_dir, 2)
     ]
     assert scan_kwargs
     assert {kw["run_key"] for kw in scan_kwargs} == {expected}

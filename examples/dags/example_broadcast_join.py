@@ -61,9 +61,7 @@ def _materialize(name: str, partitions: list[dict]) -> list[str]:
     return uris
 
 
-_ORDERS_SRC = Source(
-    source_id="orders_src", table_name="orders", options={"uris": _materialize("orders", _ORDERS)}
-)
+_ORDERS_SRC = Source(source_id="orders_src", table_name="orders", options={"uris": _materialize("orders", _ORDERS)})
 _CUSTOMERS_SRC = Source(
     source_id="customers_src", table_name="customers", options={"uris": _materialize("customers", _CUSTOMERS)}
 )
@@ -77,5 +75,5 @@ dag = dag_from_stages(
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=["sql_as_dag", "demo", "join", "broadcast"],
+    tags=["sql_as_dag", "example", "join", "broadcast"],
 )

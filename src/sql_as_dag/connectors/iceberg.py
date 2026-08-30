@@ -134,9 +134,7 @@ class IcebergSink:
             pq.write_table(table, f)
         return {"path": str(out_path), "rows": table.num_rows, "partition_id": partition_id}
 
-    def finalize(
-        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
-    ) -> dict[str, Any]:
+    def finalize(self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None) -> dict[str, Any]:
         paths = [m["path"] for m in partition_metas if m.get("rows", 0) > 0]
         catalog = _load_catalog(self._catalog_name, self._uri, self._warehouse, **self._props)
         table = self._ensure_table(catalog, paths)

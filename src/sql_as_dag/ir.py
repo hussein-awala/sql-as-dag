@@ -157,9 +157,7 @@ class Exchange:
 
     def __post_init__(self) -> None:
         if self.kind not in EXCHANGE_KINDS:
-            raise ValueError(
-                f"unknown exchange kind {self.kind!r} (expected one of {sorted(EXCHANGE_KINDS)})"
-            )
+            raise ValueError(f"unknown exchange kind {self.kind!r} (expected one of {sorted(EXCHANGE_KINDS)})")
         if self.num_buckets < 1:
             raise ValueError(f"num_buckets must be >= 1, got {self.num_buckets}")
         if self.kind == "hash_shuffle":
@@ -243,8 +241,7 @@ class StageGraph:
                 if inp.upstream_stage_id is not None:
                     if inp.upstream_stage_id not in stage_ids:
                         raise ValueError(
-                            f"Stage {stage.stage_id!r} references unknown upstream "
-                            f"stage {inp.upstream_stage_id!r}"
+                            f"Stage {stage.stage_id!r} references unknown upstream stage {inp.upstream_stage_id!r}"
                         )
                     if inp.upstream_stage_id not in seen:
                         raise ValueError(

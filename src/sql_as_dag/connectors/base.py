@@ -95,9 +95,7 @@ class SinkConnector(Protocol):
         """
         ...
 
-    def finalize(
-        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
-    ) -> dict[str, Any]:
+    def finalize(self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None) -> dict[str, Any]:
         """
         Run the optional commit step after all partitions are written.
 

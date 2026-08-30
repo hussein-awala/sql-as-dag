@@ -110,9 +110,7 @@ class ParquetSink:
             pq.write_table(table, f)
         return {"path": str(out_path), "rows": table.num_rows, "partition_id": partition_id}
 
-    def finalize(
-        self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None
-    ) -> dict[str, Any]:
+    def finalize(self, partition_metas: list[dict[str, Any]], *, run_key: str | None = None) -> dict[str, Any]:
         run_dir = self._run_dir(run_key)
         if self._write_success_marker:
             out = ObjectStoragePath(run_dir)
